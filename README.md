@@ -10,8 +10,27 @@ MCP, with structural verification and recovery. Docs (source of truth):
 
 ## Status
 
-**Milestone M0 (skeleton) in progress.** The Gateway is a stub: hardcoded `gui.*` tool
-responses and a placeholder `instructions` string. Nothing real yet.
+**Milestone M0 (skeleton): done.** Verified on OpenCode 1.18.18 (2026-08-18):
+
+- Gateway stub registers `gui.observe` / `gui.act` / `gui.verify` (hardcoded responses)
+- MCP `instructions` field (Master Prompt + marker `M0P-7F3A9C`) **lands in session
+  context** — confirmed functionally (model reproduced the marker) and the stub's
+  tools are callable end-to-end through `opencode serve` (docs' v1.17.10+ claim holds
+  on 1.18.18)
+- Real logic starts in M1 (OS Adapter), per Roadmap §A.6
+
+## Config sync note
+
+`opencode.json` at repo root is what OpenCode actually reads; `config/mcp.json` is the
+canonical registration per Roadmap §A.5. They must be kept in sync — update both when
+changing MCP server registrations.
+
+## SDK note
+
+The docs reference "a mature MCP server SDK" without pinning a version. Installed:
+`mcp` **2.0.0** — the `FastMCP` helper from 1.x is gone; the Gateway uses the lowlevel
+`Server` API (`on_list_tools` / `on_call_tool` handlers, `Server(instructions=...)`).
+The Browser Adapter (M5) should use the same pattern.
 
 ## Repo layout (per Roadmap §A.5)
 

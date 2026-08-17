@@ -1,0 +1,11 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "cua-gateway": {
+      "type": "local",
+      "command": ["uv", "run", "--project", "gateway", "cua-gateway"],
+      "cwd": ".",
+      "enabled": true
+    }
+  }
+}
