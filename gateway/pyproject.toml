@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "mcp[cli]>=2.0.0",
+    "pyobjc-framework-applicationservices>=12.2.2",
+    "pyobjc-framework-cocoa>=12.2.2",
+    "pyobjc-framework-quartz>=12.2.2",
 ]
 
 [project.scripts]

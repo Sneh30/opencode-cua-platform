@@ -37,6 +37,8 @@ def test_macos_imports_confined_to_os_adapter_directory():
     for py in GATEWAY_DIR.rglob("*.py"):
         if "os_adapter" in py.parts:
             continue
+        if any(part.startswith(".") for part in py.parts):
+            continue
         text = py.read_text()
         for mod in MACOS_IMPORTS:
             if f"import {mod}" in text or f"from {mod}" in text:
