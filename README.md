@@ -10,6 +10,17 @@ MCP, with structural verification and recovery. Docs (source of truth):
 
 ## Status
 
+**Milestone M1 (OS Adapter): done.** Verified on macOS (2026-08-18):
+
+- `shared/action_schema.py` — normalized Action/Observation/Verification shapes (§A.6 item 2)
+- `gateway/os_adapter/base.py` — `OSAdapter` ABC; platform coupling confined to `os_adapter/`
+  (ED #11, enforced by a tripwire test)
+- `gateway/os_adapter/macos_adapter.py` — screen capture (PNG), AX tree reads with frames,
+  `find_elements`, CGEvent click/double/right/drag/scroll/type/key dispatch
+- Live-verified end-to-end: clicked "New Document" in TextEdit, clicked into the AXTextArea,
+  typed a marker, and read it back via `kAXValueAttribute` — exact match
+- 15 unit/contract tests pass
+
 **Milestone M0 (skeleton): done.** Verified on OpenCode 1.18.18 (2026-08-18):
 
 - Gateway stub registers `gui.observe` / `gui.act` / `gui.verify` (hardcoded responses)
