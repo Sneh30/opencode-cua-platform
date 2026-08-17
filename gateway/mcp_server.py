@@ -9,8 +9,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 import uuid
+from pathlib import Path
 from typing import Any
+
+# `shared/` is a plain source dir imported by both MCP servers (Roadmap §A.5);
+# add the repo root so `import shared` works at runtime regardless of cwd.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server

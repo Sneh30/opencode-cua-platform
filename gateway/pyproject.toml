@@ -24,4 +24,4 @@ py-modules = ["mcp_server"]
 
 [tool.pytest.ini_options]
 testpaths = ["../tests"]
-pythonpath = ["."]
+pythonpath = [".", ".."]
