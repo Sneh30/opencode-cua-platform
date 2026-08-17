@@ -37,6 +37,7 @@ from Quartz import (
     CGEventKeyboardSetUnicodeString,
     CGEventPost,
     CGEventSetFlags,
+    CGEventSetIntegerValueField,
     kCGEventLeftMouseDown,
     kCGEventLeftMouseDragged,
     kCGEventLeftMouseUp,
@@ -286,7 +287,7 @@ class MacOSAdapter(OSAdapter):
 
     def _mouse_event(self, etype, point, button, click_state=1):
         ev = CGEventCreateMouseEvent(None, etype, CGPoint(point[0], point[1]), button)
-        ev.setIntegerValueField(kCGMouseEventClickState, click_state)
+        CGEventSetIntegerValueField(ev, kCGMouseEventClickState, click_state)
         return ev
 
     def _click(self, point) -> None:
