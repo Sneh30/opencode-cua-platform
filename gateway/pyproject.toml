@@ -1,0 +1,27 @@
+[project]
+name = "cua-gateway"
+version = "0.1.0"
+description = "CUA Gateway — MCP server for the OpenCode Computer-Use Platform"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "mcp[cli]>=2.0.0",
+]
+
+[project.scripts]
+cua-gateway = "mcp_server:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.uv]
+package = true
+
+[tool.setuptools]
+py-modules = ["mcp_server"]
+
+[tool.pytest.ini_options]
+testpaths = ["../tests"]
+pythonpath = ["."]
