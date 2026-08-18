@@ -140,11 +140,15 @@ class TestLiveGateway:
     def test_act_stale_postcondition_fails(self, tmp_path):
         adapter = FakeAdapter(tmp_path)
         adapter.ax_state = _textedit_state("no dialog here")
+        adapter.ocr_text = "TextEdit no dialog here"  # vision fallback also fails
         gw = LiveGateway(adapter, tmp_path / "logs")
         action = {"type": "click", "target_hint": "New Document", "params": {"point": [1, 2]}}
         out = gw.act("s1", action, "Open Document")
         assert out["dispatched"] is True
         assert out["verdict"] == "fail"
+        assert out["recovery"]["escalated"] is True
+        assert out["recovery"]["attempts"] == 3
+        assert out["recovery"]["strategies"] == ["retry", "reobserve", "escalate"]
 
     def test_verify_rechecks_stored_action(self, tmp_path):
         adapter = FakeAdapter(tmp_path)

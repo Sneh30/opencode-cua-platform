@@ -68,11 +68,21 @@ class GatewayVerifier:
             logger.exception("OCR failed")
             return ""
 
-    def verify(self, observation: Observation, expected: str) -> VerificationResult:
-        """Verdict for `expected` against the current screen state."""
+    def verify(
+        self,
+        observation: Observation,
+        expected: str,
+        force_source: str | None = None,
+    ) -> VerificationResult:
+        """Verdict for `expected` against the current screen state.
+
+        `force_source` overrides source selection ("vision" = the
+        Architecture §13 re-observe strategy, used on later recovery
+        attempts when the AX tree may be misleading).
+        """
         app = self._resolve_app(observation)
         state = self._ax_state(app)
-        source = best_available_source(state, prefer="auto")
+        source = best_available_source(state, prefer=force_source or "auto")
         if source is ObservationSource.ACCESSIBILITY:
             return verify(expected, ax_text(state), source)
         actual = self._ocr(observation)

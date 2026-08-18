@@ -32,7 +32,7 @@ from mcp.server.stdio import stdio_server
 
 from gateway.executor.session import SessionStore
 from gateway.executor.verifier import GatewayVerifier
-from shared.action_schema import Action, ActionType, Observation, ObservationSource
+from shared.action_schema import Action, ActionType, Observation, ObservationSource, Verdict
 
 logger = logging.getLogger("cua_gateway")
 
@@ -222,6 +222,13 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                     "required": ["type", "target_hint"],
                 },
                 "expected_postcondition": {"type": "string"},
+                "recovery_budget": {
+                    "type": "object",
+                    "properties": {
+                        "max_attempts": {"type": "integer", "minimum": 1},
+                        "max_seconds": {"type": "number", "minimum": 1},
+                    },
+                },
             },
             "required": ["session_id", "action", "expected_postcondition"],
         },
@@ -310,13 +317,79 @@ class LiveGateway:
         session_id: str,
         action_data: dict[str, Any],
         expected_postcondition: str,
+        recovery_budget: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Architecture §13: act-and-verify loop with bounded recovery.
+
+        Re-dispatches up to the budget on non-pass verdicts, switching the
+        verification source on later attempts, and escalates when the
+        budget is exhausted. Every attempt is written to the session log.
+        """
+        from shared.recovery import (
+            RecoveryBudget,
+            RecoveryTracker,
+            STRATEGY_ESCALATE,
+            append_event,
+        )
+
+        budget = RecoveryBudget(
+            max_attempts=int(recovery_budget.get("max_attempts", 3)) if recovery_budget else 3,
+            max_seconds=float(recovery_budget.get("max_seconds", 300)) if recovery_budget else 300.0,
+        )
+        tracker = RecoveryTracker(budget)
         action = _resolve_action(action_data)
-        observation = self._observe_for_act()
-        grounded = self._ground(action, observation)
-        record = self._adapter.dispatch(grounded)
-        post = self._observe_for_act()
-        result = self._verifier.verify(post, expected_postcondition)
+        grounded = self._ground(action, self._observe_for_act())
+        append_event(
+            self._logs_dir,
+            session_id=session_id,
+            worker="gateway",
+            event_type="action.dispatched",
+            action=grounded.to_dict(),
+            expected_postcondition=expected_postcondition,
+        )
+        result = None
+        while not tracker.exhausted:
+            tracker.advance()
+            record = self._adapter.dispatch(grounded)
+            post = self._observe_for_act()
+            result = self._verifier.verify(
+                post,
+                expected_postcondition,
+                force_source="vision" if tracker.attempts >= 2 else None,
+            )
+            append_event(
+                self._logs_dir,
+                session_id=session_id,
+                worker="gateway",
+                event_type="verification.result",
+                attempt=tracker.attempts,
+                verdict=result.verdict.value,
+                source_used=result.source_used,
+                evidence=result.evidence,
+            )
+            strategy = tracker.next_strategy(result.verdict)
+            if strategy == "done":
+                tracker.strategies.append("done")
+                break
+            tracker.strategies.append(strategy)
+            append_event(
+                self._logs_dir,
+                session_id=session_id,
+                worker="gateway",
+                event_type="recovery.attempted",
+                attempt=tracker.attempts,
+                strategy=strategy,
+                verdict=result.verdict.value,
+            )
+        escalated = tracker.attempts >= tracker.budget.max_attempts and result and result.verdict is not Verdict.PASS
+        if escalated:
+            append_event(
+                self._logs_dir,
+                session_id=session_id,
+                worker="gateway",
+                event_type="recovery.exhausted",
+                attempts=tracker.attempts,
+            )
         action_id = self._store.record_action(
             session_id,
             action=grounded.to_dict(),
@@ -332,6 +405,7 @@ class LiveGateway:
             "verdict": result.verdict.value,
             "evidence": result.evidence,
             "source_used": result.source_used,
+            "recovery": tracker.summary(escalated),
         }
 
     def verify(self, session_id: str, action_id: str) -> dict[str, Any] | None:
@@ -404,7 +478,7 @@ def _make_live_gateway() -> LiveGateway | None:
         return None
     from gateway.os_adapter import MacOSAdapter
 
-    logs_dir = Path(__file__).resolve().parent.parent.parent / "logs"
+    logs_dir = Path(__file__).resolve().parent.parent / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     return LiveGateway(MacOSAdapter(), logs_dir)
 
@@ -445,7 +519,14 @@ async def handle_call_tool(ctx, params):
             if action.get("type") not in ACT_TYPES:
                 return _missing("action.type")
             try:
-                return _ok(**_LIVE_GATEWAY.act(args.get("session_id", ""), action, args["expected_postcondition"]))
+                return _ok(
+                    **_LIVE_GATEWAY.act(
+                        args.get("session_id", ""),
+                        action,
+                        args["expected_postcondition"],
+                        recovery_budget=args.get("recovery_budget"),
+                    )
+                )
             except RuntimeError as exc:
                 return _error(str(exc))
         if name == "gui.verify":

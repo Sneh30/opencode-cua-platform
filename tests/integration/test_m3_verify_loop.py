@@ -217,6 +217,32 @@ async def _run(adapter: MacOSAdapter) -> None:
             r = await _call(session, "gui.verify", {"session_id": "e2e", "action_id": "no-such-id"})
             assert r.get("isError") is True
 
+            # -- recovery: budgeted retry/re-observe/escalate ----------------
+            r = await _call(
+                session,
+                "gui.act",
+                {
+                    "session_id": "e2e",
+                    "action": {"type": "click", "target_hint": "the text area", "params": {"point": text_area_point}},
+                    "expected_postcondition": "zzz-never-true",
+                    "recovery_budget": {"max_attempts": 2, "max_seconds": 60},
+                },
+            )
+            assert not r.get("isError"), r
+            assert r["verdict"] != "pass"
+            assert r["recovery"]["escalated"] is True, r
+            assert r["recovery"]["attempts"] == 2, r
+            assert r["recovery"]["strategies"] == ["retry", "escalate"], r
+            log = Path(GATEWAY_DIR.parent) / "logs" / "session-e2e.jsonl"
+            assert log.exists(), "session log was not written"
+            events = [json.loads(line) for line in log.read_text().strip().splitlines()]
+            types = [e["event"] for e in events]
+            assert "action.dispatched" in types
+            assert "verification.result" in types
+            assert "recovery.attempted" in types
+            assert "recovery.exhausted" in types
+            assert all(e["worker"] == "gateway" for e in events)
+
 
 @pytest.mark.skipif(not E2E, reason="requires CUA_E2E=1 (real model + display)")
 def test_m3_verify_loop():
