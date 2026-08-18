@@ -10,6 +10,27 @@ MCP, with structural verification and recovery. Docs (source of truth):
 
 ## Status
 
+**Milestone M2 (GUI executor — model-grounded actions): done.** Verified on macOS
+(2026-08-18):
+
+- `gateway/executor/model_client.py` — the swappable `infer()` seam (Architecture §5/§6):
+  `UiTarsMLXClient` serving `mlx-community/UI-TARS-1.5-7B-4bit` via mlx-vlm
+  (lazy model load — unit tests never touch the 4.9GB model), OSWorld-style prompt,
+  output parser, and normalization to `shared.action_schema` in screen-point coords
+- Coordinate mapping solved: the qwen2.5-vl processor `smart_resize` (factor 28,
+  min 3136, max 12845056) is replicated in-process and verified against the runtime
+  processor; retina 2× captures (3600×2338 image ↔ 1800×1169 point display) map
+  exactly; `Screenshot` now carries image pixel dims + `display_width/height`
+- e2e (TextEdit "New Document"): model grounded the click **1 px** from the button
+  center (691,627 vs 694,626), dispatch closed the dialog, AX verified the
+  postcondition
+- Root-cause found en route: a python process without **Screen Recording** permission
+  gets a redacted frame (wallpaper + menu bar only, no other apps' windows) — a
+  venv rebuild (new interpreter path) silently dropped the TCC grant; fixed by
+  adding `/opt/homebrew/bin/python3.14` to System Settings → Privacy & Security →
+  Screen Recording (pane-driven via AX, since the process itself can't see the UI)
+- 34 unit/contract tests pass; e2e gated behind `CUA_E2E=1`
+
 **Milestone M1 (OS Adapter): done.** Verified on macOS (2026-08-18):
 
 - `shared/action_schema.py` — normalized Action/Observation/Verification shapes (§A.6 item 2)

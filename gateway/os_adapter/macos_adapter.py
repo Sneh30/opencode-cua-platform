@@ -113,9 +113,11 @@ class MacOSAdapter(OSAdapter):
         bounds = CGDisplayBounds(CGMainDisplayID())
         return Screenshot(
             ref=str(output_path),
-            width=int(bounds.size.width),
-            height=int(bounds.size.height),
+            width=int(rep.pixelsWide()),
+            height=int(rep.pixelsHigh()),
             captured_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            display_width=int(bounds.size.width),
+            display_height=int(bounds.size.height),
         )
 
     def active_app(self) -> AppInfo | None:
@@ -263,6 +265,9 @@ class MacOSAdapter(OSAdapter):
         elif t == ActionType.DRAG:
             self._drag(self._point(action, "from"), self._point(action, "to"))
         elif t == ActionType.SCROLL:
+            point = action.params.get("point")
+            if point:
+                self.move_mouse((int(point[0]), int(point[1])))
             self._scroll(action.params.get("delta", (0, 3)))
         elif t == ActionType.TYPE:
             self.type_text(action.params.get("text", ""))

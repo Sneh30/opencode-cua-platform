@@ -79,12 +79,21 @@ class Action:
 
 @dataclass(frozen=True)
 class Screenshot:
-    """A captured screen image, referenced by path."""
+    """A captured screen image, referenced by path.
+
+    `width`/`height` are the image file's pixel dimensions (may exceed the
+    logical display size on Retina displays — e.g. 3600x2338 image for an
+    1800x1169 point display). `display_width`/`display_height` are the
+    logical point dimensions of the display the capture came from, so
+    downstream code can map image pixels <-> screen points.
+    """
 
     ref: str
     width: int
     height: int
     captured_at: str
+    display_width: int | None = None
+    display_height: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +101,8 @@ class Screenshot:
             "width": self.width,
             "height": self.height,
             "captured_at": self.captured_at,
+            "display_width": self.display_width,
+            "display_height": self.display_height,
         }
 
 
