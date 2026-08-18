@@ -38,7 +38,7 @@ def _text(result) -> str:
 def test_gateway_stub_smoke():
     init, tools, act, missing, verify = asyncio.run(_conversation())
 
-    assert init.server_info.name == "cua-gateway"
+    assert init.serverInfo.name == "cua-gateway"
     assert init.instructions, "MCP instructions field must be non-empty"
     assert init.instructions.startswith("# Role")
 
@@ -50,7 +50,7 @@ def test_gateway_stub_smoke():
     assert act_payload["stub"] is True
     assert act_payload["action_id"].startswith("stub-")
 
-    assert missing.is_error, "gui.act without expected_postcondition must be rejected"
+    assert missing.isError, "gui.act without expected_postcondition must be rejected"
 
     verify_payload = json.loads(_text(verify))
     assert verify_payload["verdict"] == "uncertain"

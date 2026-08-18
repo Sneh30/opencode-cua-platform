@@ -10,6 +10,16 @@
       },
       "timeout": 300000,
       "enabled": true
+    },
+    "browser-adapter": {
+      "type": "local",
+      "command": ["uv", "run", "--project", "browser_adapter", "browser-adapter"],
+      "cwd": ".",
+      "environment": {
+        "BROWSER_HEADLESS": "true"
+      },
+      "timeout": 300000,
+      "enabled": true
     }
   }
 }

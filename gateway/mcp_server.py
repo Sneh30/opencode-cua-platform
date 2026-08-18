@@ -27,6 +27,7 @@ from typing import Any
 # add the repo root so `import shared` works at runtime regardless of cwd.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import mcp.types as types
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
@@ -253,25 +254,19 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
 def _stub_result(**payload: Any) -> dict[str, Any]:
     payload.setdefault("stub", True)
     payload.setdefault("note", "M0 hardcoded response — no real executor yet")
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}]}
+    return payload
 
 
 def _missing(field: str) -> dict[str, Any]:
-    return {
-        "isError": True,
-        "content": [{"type": "text", "text": json.dumps({"error": f"missing required field: {field}"})}],
-    }
+    return {"error": f"missing required field: {field}"}
 
 
 def _error(message: str) -> dict[str, Any]:
-    return {
-        "isError": True,
-        "content": [{"type": "text", "text": json.dumps({"error": message})}],
-    }
+    return {"error": message}
 
 
 def _ok(**payload: Any) -> dict[str, Any]:
-    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}]}
+    return payload
 
 
 class LiveGateway:
@@ -486,108 +481,101 @@ def _make_live_gateway() -> LiveGateway | None:
 _LIVE_GATEWAY = _make_live_gateway()
 
 
-async def handle_list_tools(ctx, params) -> dict[str, Any]:
-    return {
-        "tools": [
-            {
-                "name": name,
-                "description": schema["description"],
-                "inputSchema": schema["inputSchema"],
-            }
-            for name, schema in TOOL_SCHEMAS.items()
-        ]
-    }
-
-
-async def handle_call_tool(ctx, params):
-    name = params.name
-    args = params.arguments or {}
-
-    if name not in TOOL_SCHEMAS:
-        return _error(f"unknown tool: {name}")
-
-    if _LIVE_GATEWAY is None:
-        return _handle_stub(name, args)
-
-    try:
-        if name == "gui.observe":
-            return _ok(**_LIVE_GATEWAY.observe(args.get("session_id", ""), args.get("prefer_source", "auto")))
-        if name == "gui.act":
-            if not args.get("expected_postcondition"):
-                return _missing("expected_postcondition")
-            action = args.get("action") or {}
-            if action.get("type") not in ACT_TYPES:
-                return _missing("action.type")
-            try:
-                return _ok(
-                    **_LIVE_GATEWAY.act(
-                        args.get("session_id", ""),
-                        action,
-                        args["expected_postcondition"],
-                        recovery_budget=args.get("recovery_budget"),
-                    )
-                )
-            except RuntimeError as exc:
-                return _error(str(exc))
-        if name == "gui.verify":
-            if not args.get("action_id"):
-                return _missing("action_id")
-            result = _LIVE_GATEWAY.verify(args.get("session_id", ""), args["action_id"])
-            if result is None:
-                return _error(f"unknown action_id: {args['action_id']}")
-            return _ok(**result)
-    except Exception as exc:  # noqa: BLE001 — surface everything to the caller
-        logger.exception("live handler failed")
-        return _error(f"gateway error: {exc}")
-
-    raise AssertionError("unreachable")
-
-
-def _handle_stub(name: str, args: dict[str, Any]) -> dict[str, Any]:
+def _stub_tool_result(name: str, args: dict[str, Any]) -> list[types.TextContent]:
     if name == "gui.observe":
-        return _stub_result(
+        return [types.TextContent(type="text", text=json.dumps(_stub_result(
             screenshot_ref="stub://screenshot",
             accessibility_tree=None,
             active_app="unknown",
             source_used="vision",
             echoed_session_id=args.get("session_id"),
-        )
-
+        ), indent=2))]
     if name == "gui.act":
         if not args.get("expected_postcondition"):
-            return _missing("expected_postcondition")
+            return [types.TextContent(type="text", text=json.dumps(_missing("expected_postcondition"), indent=2))]
         action = args.get("action") or {}
         if action.get("type") not in ACT_TYPES:
-            return _missing("action.type")
-        return _stub_result(
+            return [types.TextContent(type="text", text=json.dumps(_missing("action.type"), indent=2))]
+        return [types.TextContent(type="text", text=json.dumps(_stub_result(
             action_id=f"stub-{uuid.uuid4().hex[:12]}",
             dispatched=False,
             raw_result={"echoed_action": action},
-        )
-
+        ), indent=2))]
     if name == "gui.verify":
         if not args.get("action_id"):
-            return _missing("action_id")
-        return _stub_result(
+            return [types.TextContent(type="text", text=json.dumps(_missing("action_id"), indent=2))]
+        return [types.TextContent(type="text", text=json.dumps(_stub_result(
             verdict="uncertain",
             evidence={"stub": True},
             source_used="none",
             echoed_action_id=args.get("action_id"),
-        )
-
-    raise AssertionError("unreachable")
+        ), indent=2))]
+    return [types.TextContent(type="text", text=json.dumps(_error(f"unknown tool: {name}"), indent=2))]
 
 
 def build_server() -> Server:
-    return Server(
+    server = Server(
         "cua-gateway",
         version="0.1.0",
-        title="CUA Gateway",
-        description="OpenCode Computer-Use Platform — CUA Gateway",
         instructions=MASTER_PROMPT,
-        on_list_tools=handle_list_tools,
-        on_call_tool=handle_call_tool,
     )
+
+    @server.list_tools()
+    async def handle_list_tools() -> list[types.Tool]:
+        return [
+            types.Tool(
+                name=name,
+                description=schema["description"],
+                inputSchema=schema["inputSchema"],
+            )
+            for name, schema in TOOL_SCHEMAS.items()
+        ]
+
+    @server.call_tool()
+    async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
+        if name not in TOOL_SCHEMAS:
+            return [types.TextContent(type="text", text=json.dumps(_error(f"unknown tool: {name}"), indent=2))]
+
+        if _LIVE_GATEWAY is None:
+            return _stub_tool_result(name, arguments)
+
+        try:
+            if name == "gui.observe":
+                result = _LIVE_GATEWAY.observe(
+                    arguments.get("session_id", ""),
+                    arguments.get("prefer_source", "auto"),
+                )
+                return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+            if name == "gui.act":
+                if not arguments.get("expected_postcondition"):
+                    return [types.TextContent(type="text", text=json.dumps(_missing("expected_postcondition"), indent=2))]
+                action = arguments.get("action") or {}
+                if action.get("type") not in ACT_TYPES:
+                    return [types.TextContent(type="text", text=json.dumps(_missing("action.type"), indent=2))]
+                try:
+                    result = _LIVE_GATEWAY.act(
+                        arguments.get("session_id", ""),
+                        action,
+                        arguments["expected_postcondition"],
+                        recovery_budget=arguments.get("recovery_budget"),
+                    )
+                    return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+                except RuntimeError as exc:
+                    return [types.TextContent(type="text", text=json.dumps(_error(str(exc)), indent=2))]
+            if name == "gui.verify":
+                if not arguments.get("action_id"):
+                    return [types.TextContent(type="text", text=json.dumps(_missing("action_id"), indent=2))]
+                result = _LIVE_GATEWAY.verify(arguments.get("session_id", ""), arguments["action_id"])
+                if result is None:
+                    return [types.TextContent(type="text", text=json.dumps(_error(f"unknown action_id: {arguments['action_id']}"), indent=2))]
+                return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("live handler failed")
+            return [types.TextContent(type="text", text=json.dumps(_error(f"gateway error: {exc}"), indent=2))]
+
+        raise AssertionError("unreachable")
+
+    return server
 
 
 async def amain() -> None:
