@@ -10,6 +10,45 @@ MCP, with structural verification and recovery. Docs (source of truth):
 
 ## Status
 
+**Milestone M4 (Recovery engine): done.** Verified on macOS (2026-08-18):
+
+- `shared/recovery.py` — pure, M5-reusable recovery logic (Architecture §13):
+  bounded attempt/time budgets, the retry → re-observe (alternate state source) →
+  escalate ladder, and the structured JSON-lines session event log (§11/§17:
+  `action.dispatched`, `verification.result`, `recovery.attempted`,
+  `recovery.exhausted`)
+- Gateway `gui.act` enforces the loop server-side: on a non-pass verdict it
+  re-dispatches within budget, forces the vision state source on later attempts,
+  escalates with `recovery: {attempts, strategies, escalated, budget}` when
+  exhausted, and logs every attempt to `logs/session-<id>.jsonl`
+- `gui.act` accepts an optional `recovery_budget` (`max_attempts`, `max_seconds`)
+- e2e: budget exhaustion with `max_attempts=2` returns `["retry","escalate"]` and
+  writes the full event log; 75 unit/contract tests pass (3 skipped, CUA_E2E-gated)
+- `opencode.json`: gateway MCP registered in **live mode**
+  (`CUA_GATEWAY_LIVE=1`, 300s timeout for model-grounding latency) — after an
+  opencode restart, `gui.*` tools are available in-session and OpenCode (the
+  planner) drives observe/act/verify/recover directly
+
+**Milestone M3 (Verification engine): done.** Verified on macOS (2026-08-18):
+
+- `shared/verifier.py` — source selection (`best_available_source`: AX when the
+  per-app capability probe says trustworthy, else vision), AX text flattening
+  (titles + descriptions + values), case-insensitive substring verdicts with
+  `pass` / `fail` / `uncertain` on empty evidence (Architecture §12)
+- `gateway/executor/verifier.py` — `GatewayVerifier` glue (AX state or Vision-OCR
+  of the screenshot, duck-typed `ocr_screenshot` so the ABC stays untouched)
+- `gateway/executor/session.py` — `SessionStore` (action_id → action /
+  postcondition / record / observation / verdict), powering `gui.verify` re-checks
+- AXElement now carries `kAXValueAttribute` — verified live: typed text in
+  TextEdit reads back as `AXTextArea value='...'`, so text postconditions verify
+  against real document content, not just labels
+- e2e over stdio MCP: nonsense/stale postconditions → `fail`, typed-marker
+  postcondition → `pass`, `gui.verify` re-check of both, error paths (missing
+  postcondition, unknown action_id); environment quirks solved along the way
+  (stale `runningApplications()` after quit — use `pgrep` as ground truth and
+  retry `open` past LaunchServices bookkeeping; SIGKILL suppresses TextEdit's
+  welcome dialog — graceful quit + savedState wipe is the reliable reset)
+
 **Milestone M2 (GUI executor — model-grounded actions): done.** Verified on macOS
 (2026-08-18):
 
