@@ -108,11 +108,17 @@ class Screenshot:
 
 @dataclass(frozen=True)
 class AXElement:
-    """A single node of the accessibility tree (serializable)."""
+    """A single node of the accessibility tree (serializable).
+
+    `value` carries the element's `kAXValueAttribute` (e.g. a text field's
+    contents) when present — the verifier (shared/verifier.py) searches
+    titles, descriptions, and values.
+    """
 
     role: str
     title: str = ""
     description: str = ""
+    value: str = ""
     frame: tuple[int, int, int, int] | None = None
     children: list["AXElement"] = field(default_factory=list)
 
@@ -121,6 +127,7 @@ class AXElement:
             "role": self.role,
             "title": self.title,
             "description": self.description,
+            "value": self.value,
             "frame": list(self.frame) if self.frame else None,
             "children": [c.to_dict() for c in self.children],
         }

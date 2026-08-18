@@ -120,6 +120,24 @@ class MacOSAdapter(OSAdapter):
             display_height=int(bounds.size.height),
         )
 
+    def ocr_screenshot(self, screenshot: Screenshot) -> str:
+        """Vision-framework OCR of a captured screenshot (vision fallback
+        for the verifier, Architecture §12). Space-joined recognized lines."""
+        import Vision
+        from Foundation import NSURL
+
+        handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(
+            NSURL.fileURLWithPath_(screenshot.ref), None
+        )
+        req = Vision.VNRecognizeTextRequest.alloc().init()
+        req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+        ok, err = handler.performRequests_error_([req], None)
+        if not ok:
+            return ""
+        return " ".join(
+            obs.topCandidates_(1)[0].string() for obs in (req.results() or [])
+        )
+
     def active_app(self) -> AppInfo | None:
         ws = NSWorkspace.sharedWorkspace()
         app = ws.frontmostApplication()
@@ -180,8 +198,11 @@ class MacOSAdapter(OSAdapter):
             return None
         title = self._attr(ax_element, kAXTitleAttribute) or ""
         desc = self._attr(ax_element, kAXDescriptionAttribute) or ""
+        value = self._attr(ax_element, kAXValueAttribute) or ""
+        if not isinstance(value, str):
+            value = ""
         frame = self._frame(ax_element)
-        node = AXElement(role=str(role), title=str(title), description=str(desc), frame=frame)
+        node = AXElement(role=str(role), title=str(title), description=str(desc), value=str(value), frame=frame)
         err, children = AXUIElementCopyAttributeValue(ax_element, kAXChildrenAttribute, None)
         if err == kAXErrorSuccess and children is not None:
             for child in children:

@@ -1,7 +1,15 @@
-"""CUA Gateway MCP server — Milestone M0 stub.
+"""CUA Gateway MCP server — Milestones M0-M3.
 
-Hardcoded responses for gui.* tools and a placeholder Master Prompt published
-via the MCP `instructions` field. No real logic yet (Milestones M1-M6).
+Stub mode (default): hardcoded responses for gui.* tools, no real logic —
+safe to run anywhere, exercised by the unit smoke test.
+
+Live mode (`CUA_GATEWAY_LIVE=1`): real OS Adapter + GUI executor.
+`gui.act` performs the Architecture §12 loop: resolve target (params, or
+model grounding via `UiTarsMLXClient.infer`), dispatch, auto-verify the
+required `expected_postcondition`, and report the verdict back.
+
+The master prompt is delivered into OpenCode session context via the MCP
+`instructions` field (marked M0-PLACEHOLDER until M7 validates delivery).
 """
 
 from __future__ import annotations
@@ -9,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -21,7 +30,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
+from gateway.executor.session import SessionStore
+from gateway.executor.verifier import GatewayVerifier
+from shared.action_schema import Action, ActionType, Observation, ObservationSource
+
 logger = logging.getLogger("cua_gateway")
+
+LIVE = os.environ.get("CUA_GATEWAY_LIVE") == "1"
 
 # Master Prompt (doc 3) delivered into OpenCode session context via MCP
 # `instructions`. Marked M0-PLACEHOLDER until M7 validates delivery end-to-end.
@@ -166,12 +181,13 @@ Platform placeholder marker: M0P-7F3A9C (M0 stub — remove in M7).
 
 ACT_TYPES = ["click", "double_click", "right_click", "drag", "type", "key", "scroll"]
 
+POINT_TYPES = {ActionType.CLICK, ActionType.DOUBLE_CLICK, ActionType.RIGHT_CLICK}
+
 TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "gui.observe": {
         "description": (
             "Return the current screen state via the best available source "
-            "(accessibility tree preferred, vision fallback). M0 stub: "
-            "returns hardcoded data."
+            "(accessibility tree preferred, vision fallback)."
         ),
         "inputSchema": {
             "type": "object",
@@ -189,8 +205,8 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "gui.act": {
         "description": (
             "Execute one normalized GUI action. `expected_postcondition` is "
-            "required and feeds the verifier. M0 stub: dispatches nothing, "
-            "returns hardcoded data."
+            "required and fed to the verifier; the verdict is returned with "
+            "the dispatch record."
         ),
         "inputSchema": {
             "type": "object",
@@ -212,8 +228,8 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "gui.verify": {
         "description": (
-            "Check whether an action's expected postcondition holds. M0 "
-            "stub: always returns 'uncertain' with a stub marker."
+            "Re-check whether an action's expected postcondition holds "
+            "against the current screen state."
         ),
         "inputSchema": {
             "type": "object",
@@ -240,6 +256,154 @@ def _missing(field: str) -> dict[str, Any]:
     }
 
 
+def _error(message: str) -> dict[str, Any]:
+    return {
+        "isError": True,
+        "content": [{"type": "text", "text": json.dumps({"error": message})}],
+    }
+
+
+def _ok(**payload: Any) -> dict[str, Any]:
+    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}]}
+
+
+class LiveGateway:
+    """Real executor loop behind the gui.* tools (live mode only)."""
+
+    def __init__(self, adapter, logs_dir: Path):
+        self._adapter = adapter
+        self._logs_dir = logs_dir
+        self._store = SessionStore()
+        self._verifier = GatewayVerifier(adapter)
+
+    # -- observation ---------------------------------------------------------
+
+    def observe(self, session_id: str, prefer: str = "auto") -> dict[str, Any]:
+        shot = self._adapter.capture_screen(self._logs_dir / "observe.png")
+        app = self._adapter.active_app()
+        state = None
+        if app is not None:
+            try:
+                state = self._adapter.accessibility_state(app)
+            except Exception:
+                state = None
+        from shared.verifier import best_available_source
+
+        source = best_available_source(state, prefer=prefer)
+        observation = Observation(
+            screenshot_ref=shot.ref,
+            accessibility_tree=state.to_dict() if state else None,
+            active_app=app.name if app else "",
+            source_used=source,
+        )
+        return {
+            "screenshot_ref": observation.screenshot_ref,
+            "accessibility_tree": observation.accessibility_tree,
+            "active_app": observation.active_app,
+            "source_used": observation.source_used.value,
+        }
+
+    # -- act + verify --------------------------------------------------------
+
+    def act(
+        self,
+        session_id: str,
+        action_data: dict[str, Any],
+        expected_postcondition: str,
+    ) -> dict[str, Any]:
+        action = _resolve_action(action_data)
+        observation = self._observe_for_act()
+        grounded = self._ground(action, observation)
+        record = self._adapter.dispatch(grounded)
+        post = self._observe_for_act()
+        result = self._verifier.verify(post, expected_postcondition)
+        action_id = self._store.record_action(
+            session_id,
+            action=grounded.to_dict(),
+            expected_postcondition=expected_postcondition,
+            record=record.to_dict(),
+            observation=post,
+            verdict=result.to_dict(),
+        )
+        return {
+            "action_id": action_id,
+            "dispatched": record.dispatched,
+            "raw_result": record.raw_result,
+            "verdict": result.verdict.value,
+            "evidence": result.evidence,
+            "source_used": result.source_used,
+        }
+
+    def verify(self, session_id: str, action_id: str) -> dict[str, Any]:
+        entry = self._store.get_action(session_id, action_id)
+        if entry is None:
+            return _error(f"unknown action_id: {action_id}")
+        post = self._observe_for_act()
+        result = self._verifier.verify(post, entry["expected_postcondition"])
+        return {
+            "verdict": result.verdict.value,
+            "evidence": result.evidence,
+            "source_used": result.source_used,
+        }
+
+    def _observe_for_act(self) -> Observation:
+        shot = self._adapter.capture_screen(self._logs_dir / "act.png")
+        app = self._adapter.active_app()
+        return Observation(
+            screenshot_ref=shot.ref,
+            active_app=app.name if app else "",
+        )
+
+    def _ground(self, action: Action, observation: Observation) -> Action:
+        """Fill in resolved coordinates where the planner only gave a hint."""
+        if action.type in POINT_TYPES and "point" not in action.params:
+            from gateway.executor.model_client import ModelClientError, UiTarsMLXClient
+
+            from shared.action_schema import Screenshot
+
+            client = UiTarsMLXClient()
+            try:
+                grounded = client.infer(
+                    Screenshot(
+                        ref=observation.screenshot_ref,
+                        width=0,
+                        height=0,
+                        captured_at="",
+                    ),
+                    action.target_hint,
+                )
+            except ModelClientError as exc:
+                raise RuntimeError(f"grounding failed: {exc}") from exc
+            grounded = Action(
+                type=grounded.type,
+                target_hint=action.target_hint,
+                params=grounded.params,
+            )
+            return grounded
+        return action
+
+
+def _resolve_action(action_data: dict[str, Any]) -> Action:
+    return Action(
+        type=ActionType(action_data["type"]),
+        target_hint=action_data.get("target_hint", ""),
+        params=action_data.get("params", {}) or {},
+    )
+
+
+def _make_live_gateway() -> LiveGateway | None:
+    if not LIVE:
+        return None
+    from gateway.os_adapter import MacOSAdapter
+
+    logs_dir = Path(__file__).resolve().parent.parent.parent / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    return LiveGateway(MacOSAdapter(), logs_dir)
+
+
+_LIVE_GATEWAY = _make_live_gateway()
+
+
 async def handle_list_tools(ctx, params) -> dict[str, Any]:
     return {
         "tools": [
@@ -258,11 +422,36 @@ async def handle_call_tool(ctx, params):
     args = params.arguments or {}
 
     if name not in TOOL_SCHEMAS:
-        return {
-            "isError": True,
-            "content": [{"type": "text", "text": json.dumps({"error": f"unknown tool: {name}"})}],
-        }
+        return _error(f"unknown tool: {name}")
 
+    if _LIVE_GATEWAY is None:
+        return _handle_stub(name, args)
+
+    try:
+        if name == "gui.observe":
+            return _ok(**_LIVE_GATEWAY.observe(args.get("session_id", ""), args.get("prefer_source", "auto")))
+        if name == "gui.act":
+            if not args.get("expected_postcondition"):
+                return _missing("expected_postcondition")
+            action = args.get("action") or {}
+            if action.get("type") not in ACT_TYPES:
+                return _missing("action.type")
+            try:
+                return _ok(**_LIVE_GATEWAY.act(args.get("session_id", ""), action, args["expected_postcondition"]))
+            except RuntimeError as exc:
+                return _error(str(exc))
+        if name == "gui.verify":
+            if not args.get("action_id"):
+                return _missing("action_id")
+            return _LIVE_GATEWAY.verify(args.get("session_id", ""), args["action_id"])
+    except Exception as exc:  # noqa: BLE001 — surface everything to the caller
+        logger.exception("live handler failed")
+        return _error(f"gateway error: {exc}")
+
+    raise AssertionError("unreachable")
+
+
+def _handle_stub(name: str, args: dict[str, Any]) -> dict[str, Any]:
     if name == "gui.observe":
         return _stub_result(
             screenshot_ref="stub://screenshot",
@@ -301,8 +490,8 @@ def build_server() -> Server:
     return Server(
         "cua-gateway",
         version="0.1.0",
-        title="CUA Gateway (M0 stub)",
-        description="OpenCode Computer-Use Platform — CUA Gateway (Milestone M0 skeleton)",
+        title="CUA Gateway",
+        description="OpenCode Computer-Use Platform — CUA Gateway",
         instructions=MASTER_PROMPT,
         on_list_tools=handle_list_tools,
         on_call_tool=handle_call_tool,
