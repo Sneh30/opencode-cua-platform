@@ -158,7 +158,7 @@ class TestLiveGateway:
 
     def test_verify_unknown_action(self, tmp_path):
         gw = LiveGateway(FakeAdapter(tmp_path), tmp_path / "logs")
-        assert gw.verify("s1", "nope")["isError"] is True
+        assert gw.verify("s1", "nope") is None
 
     def test_click_grounds_when_no_point(self, tmp_path):
         adapter = FakeAdapter(tmp_path)

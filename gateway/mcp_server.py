@@ -334,10 +334,10 @@ class LiveGateway:
             "source_used": result.source_used,
         }
 
-    def verify(self, session_id: str, action_id: str) -> dict[str, Any]:
+    def verify(self, session_id: str, action_id: str) -> dict[str, Any] | None:
         entry = self._store.get_action(session_id, action_id)
         if entry is None:
-            return _error(f"unknown action_id: {action_id}")
+            return None
         post = self._observe_for_act()
         result = self._verifier.verify(post, entry["expected_postcondition"])
         return {
@@ -352,6 +352,12 @@ class LiveGateway:
         return Observation(
             screenshot_ref=shot.ref,
             active_app=app.name if app else "",
+            extra={
+                "display_width": shot.display_width,
+                "display_height": shot.display_height,
+                "width": shot.width,
+                "height": shot.height,
+            },
         )
 
     def _ground(self, action: Action, observation: Observation) -> Action:
@@ -366,9 +372,11 @@ class LiveGateway:
                 grounded = client.infer(
                     Screenshot(
                         ref=observation.screenshot_ref,
-                        width=0,
-                        height=0,
+                        width=observation.extra.get("width") or 0,
+                        height=observation.extra.get("height") or 0,
                         captured_at="",
+                        display_width=observation.extra.get("display_width"),
+                        display_height=observation.extra.get("display_height"),
                     ),
                     action.target_hint,
                 )
@@ -443,7 +451,10 @@ async def handle_call_tool(ctx, params):
         if name == "gui.verify":
             if not args.get("action_id"):
                 return _missing("action_id")
-            return _LIVE_GATEWAY.verify(args.get("session_id", ""), args["action_id"])
+            result = _LIVE_GATEWAY.verify(args.get("session_id", ""), args["action_id"])
+            if result is None:
+                return _error(f"unknown action_id: {args['action_id']}")
+            return _ok(**result)
     except Exception as exc:  # noqa: BLE001 — surface everything to the caller
         logger.exception("live handler failed")
         return _error(f"gateway error: {exc}")

@@ -22,6 +22,7 @@ from ApplicationServices import (
     kAXRoleAttribute,
     kAXSizeAttribute,
     kAXTitleAttribute,
+    kAXValueAttribute,
     kAXValueCGPointType,
     kAXValueCGSizeType,
     kAXErrorSuccess,
