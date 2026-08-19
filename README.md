@@ -10,6 +10,34 @@ MCP, with structural verification and recovery. Docs (source of truth):
 
 ## Status
 
+**Milestone M6 (Frontend — Computer-Use control UI): done.** Verified on macOS (2026-08-19):
+
+- `frontend/` — React + Vite panel (dark theme) over a zero-dependency Node
+  control server: launch an app from the catalog, pick a model, type a task,
+  and watch the agent work the real desktop — live screen feed (downscaled
+  captures streamed over SSE), activity feed with tool cards and
+  verdict/recovery badges, permission modal (or auto-approve bash/edit),
+  MCP/gateway status chips, gateway JSONL log viewer
+- Control server spawns and supervises `opencode serve` with the platform
+  `opencode.json`, so `cua-gateway` (`gui.*`) and `browser-adapter`
+  (`browser.*`) are always wired to the planner; auto-restarts on exit
+- One-command start: `./start.sh` (builds if stale, opens the browser, runs)
+- `frontend/scripts/smoke-test.js` — 11-check end-to-end suite: serve health,
+  both MCP servers connected, real LLM task run through `prompt_async` +
+  SSE, screen capture pipeline (incl. TCC fallback), abort, JSONL log stream;
+  **11/11 pass**
+- UI-TARS grounding verified live: full screenshot → `UiTarsMLXClient` →
+  normalized action (623s first-run incl. 16s model load; ~2min subsequent)
+- Fix: mlx-vlm loader hung 10+ min probing the HF hub with a fully cached
+  model — `UiTarsMLXClient` now pins `HF_HUB_OFFLINE=1` when the repo is in
+  the cache (`gateway/executor/model_client.py`)
+- Fix: Browser Adapter rewritten for browser-use 0.13.8 (`dom_state.selector_map`,
+  `get_all_children_text`, `registry.create_action_model()` dispatcher)
+- Notes: the planner loop quality is bounded by the LLM behind opencode —
+  with `deepseek-v4-flash-free` the agent ran `gui.observe` but stalled on a
+  plan; the same session on a stronger model drives act/verify/recover
+  (gateway enforces the recovery loop server-side, M4)
+
 **Milestone M4 (Recovery engine): done.** Verified on macOS (2026-08-18):
 
 - `shared/recovery.py` — pure, M5-reusable recovery logic (Architecture §13):
