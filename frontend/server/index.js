@@ -1,0 +1,522 @@
+"use strict";
+
+/**
+ * CUA Control Server — the frontend layer for the OpenCode Computer-Use
+ * Platform.
+ *
+ * Responsibilities:
+ *   - spawn and supervise `opencode serve` (cwd = platform repo root so the
+ *     MCP servers in opencode.json register: CUA Gateway + Browser Adapter)
+ *   - serve the web UI (frontend/dist) and a small JSON API
+ *   - live screen capture (screencapture + sips, gateway-python fallback)
+ *   - watch gateway JSONL session logs and screenshots in logs/
+ *   - re-broadcast opencode SSE events + control events to browsers over
+ *     a single /api/event stream
+ *   - auto-approve routine permission requests (bash/edit) when enabled so
+ *     sessions run hands-free
+ *
+ * Zero npm runtime dependencies.
+ */
+
+const http = require("node:http");
+const path = require("node:path");
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const { spawn } = require("node:child_process");
+
+const { OpencodeServer } = require("./opencode");
+const { GatewayLogs } = require("./logs");
+const screen = require("./screen");
+const apps = require("./apps");
+
+const REPO_ROOT = path.resolve(__dirname, "..", "..");
+const DIST_DIR = path.join(__dirname, "..", "dist");
+const LOGS_DIR = path.join(REPO_ROOT, "logs");
+const CONTROL_PORT = Number(process.env.PORT) || 8787;
+const OPENCODE_PORT = Number(process.env.OPENCODE_PORT) || 49152;
+
+const MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript",
+  ".mjs": "text/javascript",
+  ".css": "text/css",
+  ".json": "application/json",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".webmanifest": "application/manifest+json",
+  ".map": "application/json",
+};
+
+// ---------------------------------------------------------------------------
+// SSE hub
+// ---------------------------------------------------------------------------
+
+const clients = new Set();
+
+function broadcast(event) {
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+  for (const res of clients) {
+    try {
+      res.write(payload);
+    } catch {
+      clients.delete(res);
+    }
+  }
+}
+
+function isBusy() {
+  return state.sessionStatus && state.sessionStatus[state.activeSession?.id]?.type === "busy";
+}
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+const state = {
+  opencode: null,
+  logs: null,
+  activeSession: null,
+  sessionStatus: {},
+  mcp: {},
+  providers: null,
+  models: [],
+  defaultModel: null,
+  autoApprove: true,
+  autoApproveTypes: new Set(["bash", "edit"]),
+  lastScreen: null,
+  screenInterval: null,
+  appsRunning: {},
+  startedAt: Date.now(),
+  screenCaptureEnabled: true,
+};
+
+// ---------------------------------------------------------------------------
+// opencode lifecycle
+// ---------------------------------------------------------------------------
+
+async function ensureOpencode() {
+  if (state.opencode && state.opencode.running) return state.opencode;
+  state.opencode = new OpencodeServer({ repoRoot: REPO_ROOT, port: CONTROL_PORT });
+  state.opencode.on("event", (evt) => handleOpencodeEvent(evt));
+  state.opencode.on("log", (line) => broadcast({ type: "opencode.log", properties: { line } }));
+  try {
+    await state.opencode.start({ port: OPENCODE_PORT });
+    await refreshMeta();
+    return state.opencode;
+  } catch (err) {
+    state.opencode = null;
+    throw err;
+  }
+}
+
+async function refreshMeta() {
+  if (!state.opencode?.running) return;
+  try {
+    state.mcp = await state.opencode.mcpStatus();
+  } catch {
+    state.mcp = {};
+  }
+  try {
+    state.sessionStatus = await state.opencode.sessionStatus();
+  } catch {
+    state.sessionStatus = {};
+  }
+  try {
+    const prov = await state.opencode.listProviders();
+    state.providers = prov;
+    const connected = new Set(prov.connected || []);
+    const models = [];
+    for (const p of prov.all || []) {
+      if (!connected.has(p.id)) continue;
+      for (const [modelId, m] of Object.entries(p.models || {})) {
+        if (m.status === "deprecated" || m.experimental) continue;
+        models.push({ providerID: p.id, modelID: modelId, name: m.name || modelId, limit: m.limit });
+      }
+    }
+    state.models = models;
+    const def = prov.default || {};
+    state.defaultModel = models.length
+      ? models.find((m) => m.providerID === def.opencode)
+        || models[0]
+      : null;
+  } catch {
+    /* providers optional */
+  }
+  broadcast({ type: "meta.updated", properties: metaPayload() });
+}
+
+function handleOpencodeEvent(evt) {
+  switch (evt.type) {
+    case "session.status": {
+      state.sessionStatus[evt.properties.sessionID] = evt.properties.status;
+      broadcast({ type: evt.type, properties: evt.properties });
+      break;
+    }
+    case "session.idle":
+    case "session.created":
+    case "session.updated":
+    case "session.deleted":
+    case "session.error":
+    case "message.updated":
+    case "message.part.updated":
+    case "message.part.removed":
+    case "message.removed":
+    case "todo.updated":
+    case "file.edited":
+    case "session.diff":
+    case "permission.replied":
+      broadcast({ type: evt.type, properties: evt.properties });
+      break;
+    case "permission.updated": {
+      const p = evt.properties;
+      broadcast({ type: evt.type, properties: p });
+      maybeAutoApprove(p);
+      break;
+    }
+    case "server.connected":
+    case "installation.updated":
+      break;
+    default:
+      broadcast({ type: evt.type, properties: evt.properties || {} });
+  }
+}
+
+function maybeAutoApprove(perm) {
+  if (!state.autoApprove) return;
+  if (!state.autoApproveTypes.has(perm.type) && !perm.type.startsWith("bash:")) return;
+  if (!state.opencode) return;
+  state.opencode
+    .replyPermission(perm.sessionID, perm.id, "allow", false)
+    .then(() => {
+      broadcast({
+        type: "permission.auto",
+        properties: { permissionID: perm.id, sessionID: perm.sessionID, title: perm.title },
+      });
+    })
+    .catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Screen capture loop
+// ---------------------------------------------------------------------------
+
+async function captureTick() {
+  if (!state.screenCaptureEnabled || clients.size === 0) return;
+  try {
+    const shot = await screen.capture();
+    if (shot.ok && state.lastScreen !== shot.at) {
+      state.lastScreen = shot.at;
+      broadcast({ type: "screen.updated", properties: { at: shot.at } });
+    } else if (!shot.ok) {
+      broadcast({ type: "screen.error", properties: { error: shot.error } });
+    }
+  } catch {
+    /* ignore transient capture errors */
+  }
+}
+
+function startScreenLoop() {
+  if (state.screenInterval) return;
+  state.screenInterval = setInterval(captureTick, isBusy() ? 1200 : 2500);
+  if (state.screenInterval.unref) state.screenInterval.unref();
+  captureTick();
+}
+
+function stopScreenLoop() {
+  if (state.screenInterval) {
+    clearInterval(state.screenInterval);
+    state.screenInterval = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP plumbing
+// ---------------------------------------------------------------------------
+
+function sendJson(res, code, obj) {
+  const body = JSON.stringify(obj, null, 2);
+  res.writeHead(code, {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+  });
+  res.end(body);
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (c) => {
+      data += c;
+      if (data.length > 2_000_000) {
+        reject(new Error("body too large"));
+        req.destroy();
+      }
+    });
+    req.on("end", () => {
+      try {
+        resolve(data ? JSON.parse(data) : {});
+      } catch {
+        reject(new Error("invalid JSON body"));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function serveStatic(res, rel) {
+  let file = path.join(DIST_DIR, rel === "/" ? "index.html" : rel);
+  if (!file.startsWith(DIST_DIR)) {
+    res.writeHead(403).end("forbidden");
+    return;
+  }
+  if (fs.existsSync(file) && fs.statSync(file).isDirectory()) {
+    file = path.join(file, "index.html");
+  }
+  if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
+    file = path.join(DIST_DIR, "index.html"); // SPA fallback
+  }
+  const ext = path.extname(file).toLowerCase();
+  res.writeHead(200, {
+    "Content-Type": MIME[ext] || "application/octet-stream",
+    "Cache-Control": ext === ".html" ? "no-store" : "public, max-age=300",
+  });
+  fs.createReadStream(file).pipe(res);
+}
+
+function metaPayload() {
+  return {
+    healthy: state.opencode?.running,
+    version: state.opencode?.health?.version || "",
+    opencodeUrl: state.opencode?.url || null,
+    mcp: state.mcp,
+    models: state.models,
+    defaultModel: state.defaultModel,
+    autoApprove: state.autoApprove,
+    busy: isBusy(),
+    screen: screen.lastCaptureInfo(),
+    logsDir: LOGS_DIR,
+    startedAt: state.startedAt,
+    gatewayLogs: state.logs ? state.logs.snapshot() : { files: {}, screenshots: {} },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// API routes
+// ---------------------------------------------------------------------------
+
+async function handleApi(req, res, url) {
+  const { pathname } = url;
+
+  // -- status -----------------------------------------------------------
+  if (pathname === "/api/status" && req.method === "GET") {
+    return sendJson(res, 200, metaPayload());
+  }
+
+  // -- SSE event stream -------------------------------------------------
+  if (pathname === "/api/event" && req.method === "GET") {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    res.write(`data: ${JSON.stringify({ type: "hello", properties: metaPayload() })}\n\n`);
+    clients.add(res);
+    startScreenLoop();
+    res.on("close", () => {
+      clients.delete(res);
+      if (clients.size === 0) stopScreenLoop();
+    });
+    return;
+  }
+
+  // -- apps -------------------------------------------------------------
+  if (pathname === "/api/apps" && req.method === "GET") {
+    const running = await apps.runningStatus();
+    return sendJson(res, 200, {
+      apps: apps.APPS.map((a) => ({ ...a, running: !!running[`${a.name}|${a.proc}`] })),
+    });
+  }
+
+  if (pathname === "/api/apps/launch" && req.method === "POST") {
+    const body = await readBody(req);
+    const name = (body.name || "").trim();
+    if (!name) return sendJson(res, 400, { error: "missing name" });
+    const result = await apps.launch(name, { path: body.path });
+    broadcast({ type: "app.launched", properties: { name, ok: result.ok, error: result.error } });
+    return sendJson(res, result.ok ? 200 : 500, result);
+  }
+
+  // -- screen -----------------------------------------------------------
+  if (pathname === "/api/screen.jpg" && req.method === "GET") {
+    const shot = await screen.capture();
+    const file = screen.screenFile();
+    if (!file) return sendJson(res, 500, { error: shot.error || "no capture" });
+    res.writeHead(200, {
+      "Content-Type": "image/jpeg",
+      "Cache-Control": "no-store",
+      "X-Capture-At": String(shot.at),
+    });
+    return fs.createReadStream(file).pipe(res);
+  }
+
+  // -- gateway screenshots ----------------------------------------------
+  const shotMatch = pathname.match(/^\/api\/gateway-screenshot\/([^/]+)$/);
+  if (shotMatch && req.method === "GET") {
+    const name = path.basename(shotMatch[1]);
+    if (!/\.(png|jpe?g|webp)$/i.test(name)) return sendJson(res, 400, { error: "bad name" });
+    const file = path.join(LOGS_DIR, name);
+    if (!fs.existsSync(file)) return sendJson(res, 404, { error: "not found" });
+    res.writeHead(200, {
+      "Content-Type": name.endsWith(".png") ? "image/png" : "image/jpeg",
+      "Cache-Control": "no-store",
+    });
+    return fs.createReadStream(file).pipe(res);
+  }
+
+  // -- gateway logs -----------------------------------------------------
+  if (pathname === "/api/logs" && req.method === "GET") {
+    return sendJson(res, 200, state.logs ? state.logs.snapshot() : { files: {}, screenshots: {} });
+  }
+
+  // -- opencode passthrough ---------------------------------------------
+  if (!state.opencode?.running) {
+    return sendJson(res, 503, { error: "opencode server not running — retry in a moment" });
+  }
+
+  if (pathname === "/api/sessions" && req.method === "GET") {
+    return sendJson(res, 200, await state.opencode.listSessions());
+  }
+
+  if (pathname === "/api/sessions" && req.method === "POST") {
+    const body = await readBody(req);
+    const s = await state.opencode.createSession(body.title);
+    broadcast({ type: "session.created", properties: { info: s } });
+    return sendJson(res, 200, s);
+  }
+
+  const sessionMatch = pathname.match(/^\/api\/session\/([^/]+)$/);
+  const taskMatch = pathname.match(/^\/api\/session\/([^/]+)\/task$/);
+  const abortMatch = pathname.match(/^\/api\/session\/([^/]+)\/abort$/);
+  const messagesMatch = pathname.match(/^\/api\/session\/([^/]+)\/messages$/);
+  const permMatch = pathname.match(/^\/api\/session\/([^/]+)\/permissions\/([^/]+)$/);
+
+  if (sessionMatch && req.method === "GET") {
+    return sendJson(res, 200, await state.opencode.getSession(sessionMatch[1]));
+  }
+
+  if (sessionMatch && req.method === "DELETE") {
+    await state.opencode.deleteSession(sessionMatch[1]);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (taskMatch && req.method === "POST") {
+    const id = taskMatch[1];
+    const body = await readBody(req);
+    const text = (body.text || "").trim();
+    if (!text) return sendJson(res, 400, { error: "missing task text" });
+    let model = body.model;
+    if (model && !model.modelID) model = null;
+    state.activeSession = { id, title: (body.title || text).slice(0, 60) };
+    await state.opencode.promptAsync(id, { text, model: model || null });
+    broadcast({ type: "task.started", properties: { sessionID: id, text } });
+    return sendJson(res, 202, { ok: true });
+  }
+
+  if (abortMatch && req.method === "POST") {
+    await state.opencode.abort(abortMatch[1]);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (messagesMatch && req.method === "GET") {
+    return sendJson(res, 200, await state.opencode.listMessages(messagesMatch[1]));
+  }
+
+  if (permMatch && req.method === "POST") {
+    const body = await readBody(req);
+    const response = body.response === "deny" ? "deny" : "allow";
+    await state.opencode.replyPermission(permMatch[1], permMatch[2], response, !!body.remember);
+    return sendJson(res, 200, { ok: true });
+  }
+
+  // -- settings ---------------------------------------------------------
+  if (pathname === "/api/settings" && req.method === "POST") {
+    const body = await readBody(req);
+    if (typeof body.autoApprove === "boolean") state.autoApprove = body.autoApprove;
+    if (typeof body.screenCaptureEnabled === "boolean") {
+      state.screenCaptureEnabled = body.screenCaptureEnabled;
+      if (body.screenCaptureEnabled) startScreenLoop();
+      else stopScreenLoop();
+    }
+    broadcast({ type: "meta.updated", properties: metaPayload() });
+    return sendJson(res, 200, { ok: true, autoApprove: state.autoApprove });
+  }
+
+  return sendJson(res, 404, { error: `no route: ${pathname}` });
+}
+
+// ---------------------------------------------------------------------------
+// Main server
+// ---------------------------------------------------------------------------
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  try {
+    if (url.pathname.startsWith("/api/")) {
+      await handleApi(req, res, url);
+    } else if (req.method === "GET") {
+      serveStatic(res, url.pathname);
+    } else {
+      res.writeHead(405).end();
+    }
+  } catch (err) {
+    if (!res.headersSent) sendJson(res, 500, { error: err.message });
+    else res.end();
+  }
+});
+
+async function main() {
+  fs.mkdirSync(LOGS_DIR, { recursive: true });
+  state.logs = new GatewayLogs(LOGS_DIR);
+  state.logs.on("append", ({ file, event }) => {
+    broadcast({ type: "gateway.log", properties: { file, event } });
+  });
+  state.logs.on("screenshots", (shots) => {
+    broadcast({ type: "gateway.screenshots", properties: shots });
+  });
+  state.logs.start();
+
+  // heartbeat so browsers can detect control-server liveness
+  setInterval(() => {
+    if (clients.size === 0) return;
+    broadcast({ type: "ping", properties: { t: Date.now() } });
+  }, 20_000);
+
+  server.listen(CONTROL_PORT, "127.0.0.1", async () => {
+    console.log(`CUA Control Server: http://localhost:${CONTROL_PORT}`);
+    try {
+      await ensureOpencode();
+      console.log(
+        `opencode serve healthy (${state.opencode.health.version}) at ${state.opencode.url}`
+      );
+    } catch (err) {
+      console.error(`opencode serve failed to start: ${err.message}`);
+    }
+  });
+
+  const shutdown = async () => {
+    console.log("shutting down...");
+    state.logs.stop();
+    if (state.opencode) await state.opencode.stop();
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref();
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+
+main();

@@ -1,13 +1,16 @@
 import asyncio
 import json
+from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
 SERVER = StdioServerParameters(
     command="uv",
     args=["run", "--project", "gateway", "cua-gateway"],
-    cwd="..",
+    cwd=str(REPO_ROOT),
 )
 
 

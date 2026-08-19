@@ -1,0 +1,20 @@
+{
+  "name": "cua-platform-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Control frontend for the OpenCode Computer-Use Platform — spawns opencode serve, launches apps, streams the agent's live screen and activity feed",
+  "scripts": {
+    "build": "vite build web --outDir dist --emptyOutDir",
+    "dev": "vite web",
+    "start": "node server/index.js",
+    "test:smoke": "node scripts/smoke-test.js"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^6.0.0"
+  }
+}
