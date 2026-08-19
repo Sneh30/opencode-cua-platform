@@ -9,3 +9,6 @@ logs/
 .opencode/
 *.sqlite
 *.sqlite3dist/
+
+# frontend deps
+frontend/node_modules/
