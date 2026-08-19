@@ -19,12 +19,17 @@ an LLM call happens in the GUI dispatch path.
 from __future__ import annotations
 
 import ast
+import logging
 import math
+import os
 import re
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any
 
 from shared.action_schema import Action, ActionType, Screenshot
+
+logger = logging.getLogger("cua_gateway.model_client")
 
 # ---------------------------------------------------------------------------
 # Model-agnostic contract
@@ -281,12 +286,37 @@ class UiTarsMLXClient(ModelClient):
 
     def _ensure_loaded(self):
         if self._model is None:
+            self._force_offline_if_cached()
             from mlx_vlm import load
             from mlx_vlm.prompt_utils import apply_chat_template  # noqa: F401
             from mlx_vlm.utils import load_config
 
             self._model, self._processor = load(self.model_id)
             self._config = load_config(self.model_id)
+
+    @staticmethod
+    def _force_offline_if_cached() -> None:
+        """Use the HF cache when the model is already downloaded.
+
+        mlx-vlm's loader can hang for minutes on network probes of the HF
+        hub even when every file is already cached locally. When the model
+        repo is present under the HF cache, pin the hub to offline mode so
+        the first `gui.act` loads in seconds instead of hanging.
+        """
+        repo_dir = "models--" + UiTarsMLXClient.model_id_for_cache("mlx-community/UI-TARS-1.5-7B-4bit")
+        hf_home = os.environ.get("HF_HOME") or str(Path.home() / ".cache" / "huggingface")
+        if (Path(hf_home) / "hub" / repo_dir).is_dir():
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+        elif os.environ.get("HF_HUB_OFFLINE") != "1":
+            logger.warning(
+                "UI-TARS model not found in HF cache (%s); first load will download it",
+                Path(hf_home) / "hub" / repo_dir,
+            )
+
+    @staticmethod
+    def model_id_for_cache(model_id: str) -> str:
+        return model_id.replace("/", "--")
 
     def infer(self, screenshot: Screenshot, instruction: str, history: list[str] | None = None) -> Action:
         self._ensure_loaded()
