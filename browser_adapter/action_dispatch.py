@@ -32,6 +32,12 @@ class BrowserDispatcher:
     def __init__(self, browser_session: BrowserSession, controller: Controller):
         self._session = browser_session
         self._controller = controller
+        self._action_model = None
+
+    def _model(self):
+        if self._action_model is None:
+            self._action_model = self._controller.registry.create_action_model()
+        return self._action_model
 
     async def dispatch(self, action: Action) -> ActionRecord:
         """Execute one normalized browser action via Controller registry."""
@@ -64,10 +70,9 @@ class BrowserDispatcher:
         url = action.params.get("url") or action.target_hint
         if not url:
             raise BrowserDispatchError("navigate requires 'url' in params or target_hint")
-        result = await self._controller.act(
-            {"navigate": {"url": url}},
-            browser_session=self._session,
-        )
+        new_tab = bool(action.params.get("new_tab", False))
+        am = self._model()(navigate={"url": url, "new_tab": new_tab})
+        result = await self._controller.act(am, browser_session=self._session)
         return ActionRecord(
             action_id="",
             dispatched=True,
@@ -78,10 +83,8 @@ class BrowserDispatcher:
         index = action.params.get("index")
         if index is None:
             raise BrowserDispatchError("click requires 'index' in params")
-        result = await self._controller.act(
-            {"click": {"index": int(index)}},
-            browser_session=self._session,
-        )
+        am = self._model()(click={"index": int(index)})
+        result = await self._controller.act(am, browser_session=self._session)
         return ActionRecord(
             action_id="",
             dispatched=True,
@@ -94,10 +97,8 @@ class BrowserDispatcher:
         clear = action.params.get("clear", True)
         if index is None:
             raise BrowserDispatchError("type requires 'index' in params")
-        result = await self._controller.act(
-            {"input": {"index": int(index), "text": text, "clear": clear}},
-            browser_session=self._session,
-        )
+        am = self._model()(input={"index": int(index), "text": text, "clear": clear})
+        result = await self._controller.act(am, browser_session=self._session)
         return ActionRecord(
             action_id="",
             dispatched=True,
@@ -110,10 +111,10 @@ class BrowserDispatcher:
             raise BrowserDispatchError("extract requires 'query' in params or target_hint")
         extract_links = action.params.get("extract_links", False)
         extract_images = action.params.get("extract_images", False)
-        result = await self._controller.act(
-            {"extract": {"query": query, "extract_links": extract_links, "extract_images": extract_images}},
-            browser_session=self._session,
+        am = self._model()(
+            extract={"query": query, "extract_links": extract_links, "extract_images": extract_images}
         )
+        result = await self._controller.act(am, browser_session=self._session)
         return ActionRecord(
             action_id="",
             dispatched=True,
@@ -127,10 +128,8 @@ class BrowserDispatcher:
         params = {"down": down, "pages": pages}
         if index is not None:
             params["index"] = int(index)
-        result = await self._controller.act(
-            {"scroll": params},
-            browser_session=self._session,
-        )
+        am = self._model()(scroll=params)
+        result = await self._controller.act(am, browser_session=self._session)
         return ActionRecord(
             action_id="",
             dispatched=True,
@@ -142,10 +141,8 @@ class BrowserDispatcher:
         option = action.params.get("option")
         if index is None or option is None:
             raise BrowserDispatchError("select requires 'index' and 'option' in params")
-        result = await self._controller.act(
-            {"select_dropdown": {"index": int(index), "option": option}},
-            browser_session=self._session,
-        )
+        am = self._model()(select_dropdown={"index": int(index), "text": option})
+        result = await self._controller.act(am, browser_session=self._session)
         return ActionRecord(
             action_id="",
             dispatched=True,
@@ -156,10 +153,8 @@ class BrowserDispatcher:
         keys = action.params.get("keys")
         if not keys:
             raise BrowserDispatchError("key requires 'keys' in params")
-        result = await self._controller.act(
-            {"send_keys": {"keys": keys}},
-            browser_session=self._session,
-        )
+        am = self._model()(send_keys={"keys": keys})
+        result = await self._controller.act(am, browser_session=self._session)
         return ActionRecord(
             action_id="",
             dispatched=True,

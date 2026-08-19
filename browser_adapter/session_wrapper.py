@@ -104,7 +104,13 @@ class BrowserSessionWrapper:
                     }
                     for tab in state.tabs
                 ],
-                "focused_element": state.focused_element,
+                "focused_element": getattr(state, "focused_element", None) or (
+                    getattr(state, "page_info", None)
+                    and {
+                        "pixels_above": state.page_info.pixels_above,
+                        "pixels_below": state.page_info.pixels_below,
+                    }
+                ),
             },
             active_app="browser",
             source_used=ObservationSource.DOM,
@@ -153,7 +159,9 @@ class BrowserSessionWrapper:
             parts.append(f"Title: {state.title}")
 
         # Add interactive elements
-        for element in state.selector_map.values():
+        dom_state = getattr(state, "dom_state", None)
+        selector_map = (dom_state.selector_map if dom_state else None) or {}
+        for element in selector_map.values():
             text_parts = []
             if element.tag_name:
                 text_parts.append(element.tag_name)
@@ -167,8 +175,12 @@ class BrowserSessionWrapper:
                 text_parts.append(f"type={element.attributes['type']}")
             if element.attributes.get("value"):
                 text_parts.append(f"value={element.attributes['value']}")
-            if element.text and element.text.strip():
-                text_parts.append(element.text.strip())
+            try:
+                element_text = element.get_all_children_text()
+            except Exception:
+                element_text = ""
+            if element_text and element_text.strip():
+                text_parts.append(element_text.strip())
 
             if text_parts:
                 parts.append(" ".join(text_parts))
