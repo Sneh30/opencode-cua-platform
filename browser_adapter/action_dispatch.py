@@ -10,6 +10,7 @@ LLM planning loop).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -106,20 +107,64 @@ class BrowserDispatcher:
         )
 
     async def _extract(self, action: Action) -> ActionRecord:
-        query = action.params.get("query") or action.target_hint
+        """Deterministic DOM extraction (no extraction LLM required).
+
+        `query`/`text` is tried as a CSS selector first; if it matches
+        nothing it is matched against element text content. Returns up to
+        20 matches as text (optionally with href/src when the flags are
+        set). This avoids browser-use's LLM-gated extract, which errors
+        with 'Action extract requires page_extraction_llm' when no
+        extraction model is configured.
+        """
+        params = action.params or {}
+        query = params.get("query") or params.get("text") or action.target_hint
         if not query:
-            raise BrowserDispatchError("extract requires 'query' in params or target_hint")
-        extract_links = action.params.get("extract_links", False)
-        extract_images = action.params.get("extract_images", False)
-        am = self._model()(
-            extract={"query": query, "extract_links": extract_links, "extract_images": extract_images}
-        )
-        result = await self._controller.act(am, browser_session=self._session)
+            raise BrowserDispatchError("extract requires 'query'/'text' in params or target_hint")
+        extract_links = bool(params.get("extract_links", False))
+        extract_images = bool(params.get("extract_images", False))
+        try:
+            page = await self._session.must_get_current_page()
+            raw = await page.evaluate(self._EXTRACT_JS, query, extract_links, extract_images)
+        except Exception as exc:
+            logger.exception("extract failed for query %s", query)
+            return ActionRecord(
+                action_id="",
+                dispatched=False,
+                raw_result={"query": query, "error": str(exc)},
+            )
+        try:
+            matches = json.loads(raw)
+        except Exception:
+            matches = raw
         return ActionRecord(
             action_id="",
             dispatched=True,
-            raw_result={"query": query, "result": str(result)},
+            raw_result={"query": query, "matches": matches},
         )
+
+    _EXTRACT_JS = r"""
+(query, extractLinks, extractImages) => {
+  const cap = 20;
+  const out = [];
+  const firstLink = (el) => { const a = el.tagName === "A" ? el : el.querySelector("a"); return a ? a.href : null; };
+  const firstImg = (el) => { const i = el.tagName === "IMG" ? el : el.querySelector("img"); return i ? i.src : null; };
+  const push = (el) => {
+    const text = (el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 2000);
+    const entry = { text };
+    if (extractLinks) entry.href = firstLink(el);
+    if (extractImages) entry.src = firstImg(el);
+    out.push(entry);
+  };
+  let els = [];
+  try { els = Array.from(document.querySelectorAll(query)); } catch (e) { els = []; }
+  if (els.length === 0) {
+    els = Array.from(document.querySelectorAll("h1,h2,h3,h4,p,li,a,button,span,td,th,div,img"))
+      .filter((el) => (el.textContent || "").trim().toLowerCase().includes(query.toLowerCase()));
+  }
+  els.slice(0, cap).forEach(push);
+  return JSON.stringify(out);
+}
+"""
 
     async def _scroll(self, action: Action) -> ActionRecord:
         down = action.params.get("down", True)

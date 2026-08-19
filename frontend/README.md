@@ -71,6 +71,16 @@ node frontend/scripts/smoke-test.js
 stream, session lifecycle. Env overrides: `SMOKE_PORT` (18991),
 `SMOKE_OPENCODE_PORT` (18992). Takes ~2–3 min.
 
+```sh
+node frontend/scripts/browser-e2e.js
+```
+
+Full browser loop through opencode: the planner drives `browser.act`
+(navigate + extract) on example.com via the browser-adapter MCP server and
+must answer with the h1 text. Retries up to 3× when the (free-tier) planner
+produces inconclusive output. Env overrides: `BE2E_PORT` (19991),
+`BE2E_OPENCODE_PORT` (19992). Takes ~3–10 min.
+
 ## Notes
 
 - Requires a Screen Recording grant for the process running the control
