@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -33,9 +34,26 @@ from mcp.server.stdio import stdio_server
 
 from gateway.executor.session import SessionStore
 from gateway.executor.verifier import GatewayVerifier
-from shared.action_schema import Action, ActionType, Observation, ObservationSource, Verdict
+from shared.action_schema import (
+    Action,
+    ActionType,
+    Observation,
+    VerificationResult,
+    Verdict,
+)
 
 logger = logging.getLogger("cua_gateway")
+
+# Settle time after a CGEvent dispatch before the evidence read-back.
+SETTLE_SECONDS = {
+    ActionType.CLICK: 0.6,
+    ActionType.DOUBLE_CLICK: 0.6,
+    ActionType.RIGHT_CLICK: 0.6,
+    ActionType.DRAG: 0.8,
+    ActionType.TYPE: 0.8,
+    ActionType.KEY: 0.5,
+    ActionType.SCROLL: 0.5,
+}
 
 LIVE = os.environ.get("CUA_GATEWAY_LIVE") == "1"
 
@@ -93,6 +111,45 @@ and do not skip a cheaper/more reliable option to reach for a fancier one:
 Never use gui.* to reimplement something a native tool or browser.* tool
 already does. This wastes an inference-costly step and gives you a weaker
 verification story than the tool you skipped.
+
+# Launching and switching apps
+
+- Launch or activate a desktop app with the shell, never by clicking the
+  platform's own "Launch App" UI: `open -a "TextEdit"` (or `open -a
+  "TextEdit" --args <file>` to open a file). This is instant and
+  deterministic. Do not click buttons of the CUA Control platform UI — it
+  is the controller you run on, not a target application.
+- After launching, `gui.observe` tells you which app became frontmost.
+
+# Reading the screen (gui.observe)
+
+- gui.observe returns TEXT: the accessibility tree of the frontmost app,
+  where every element has a `frame` = [x, y, width, height] in screen
+  points. Your model may not be able to view screenshots at all — rely on
+  the tree.
+- The tree covers the frontmost app only. Use `running_apps` (names +
+  window titles) to know what else is open; launch/activate what you need
+  with `open -a` first, then observe again.
+- If an element you need is missing from the tree (e.g. a save-dialog
+  text field), activate the app/window first and re-observe.
+
+# Dispatching actions (gui.act)
+
+- For click/double-click/right-click, derive the element's frame center
+  from the AX tree and pass it as `params: {"point": [x, y]}`. Supplying
+  the point is the fast path — dispatch is immediate and needs no model.
+- If you genuinely lack coordinates (no frame in the tree), you may pass
+  only a `target_hint` and the Gateway will ground it with a local vision
+  model — but that takes ~2 minutes per call, so only as a fallback.
+- Keyboard shortcuts: `{"type": "key", "params": {"key": "cmd+a"}}` —
+  modifiers and key joined with `+` (cmd, ctrl, alt, shift). A separate
+  `modifiers` array is also accepted.
+- Every gui.act call still requires an `expected_postcondition`; the
+  Gateway verifies it after dispatching and returns the verdict — read it.
+- For `type` actions the Gateway will NOT re-dispatch on a failed
+  verdict (that would duplicate text) — it re-verifies. If a type truly
+  failed, recover yourself: clear the field (cmd+a, then delete) before
+  retyping.
 
 # Before every gui.act or browser.act call
 
@@ -277,6 +334,15 @@ class LiveGateway:
         self._logs_dir = logs_dir
         self._store = SessionStore()
         self._verifier = GatewayVerifier(adapter)
+        self._model_client = None
+        try:
+            from gateway.executor.model_client import get_client
+
+            self._model_client = get_client()
+            self._model_client.warmup()
+            logger.info("model warmup scheduled at gateway start")
+        except Exception:  # noqa: BLE001
+            logger.warning("model warmup unavailable; grounding will load on first use", exc_info=True)
 
     # -- observation ---------------------------------------------------------
 
@@ -292,17 +358,38 @@ class LiveGateway:
         from shared.verifier import best_available_source
 
         source = best_available_source(state, prefer=prefer)
+        tree, truncated = _trim_tree(state.to_dict() if state else None)
         observation = Observation(
             screenshot_ref=shot.ref,
-            accessibility_tree=state.to_dict() if state else None,
+            accessibility_tree=tree,
             active_app=app.name if app else "",
             source_used=source,
         )
+        running: list[dict[str, Any]] = []
+        try:
+            for info in self._adapter.list_running_apps():
+                windows = self._adapter.window_titles(info)
+                running.append(
+                    {
+                        "name": info.name,
+                        "bundle_id": info.bundle_id,
+                        "windows": windows,
+                    }
+                )
+        except Exception:
+            pass
         return {
             "screenshot_ref": observation.screenshot_ref,
             "accessibility_tree": observation.accessibility_tree,
             "active_app": observation.active_app,
             "source_used": observation.source_used.value,
+            "running_apps": running,
+            "tree_truncated": truncated,
+            "note": (
+                "AX tree covers the frontmost app only; use running_apps for "
+                "everything else. Pass params.point (frame center) to gui.act "
+                "to skip slow vision grounding."
+            ),
         }
 
     # -- act + verify --------------------------------------------------------
@@ -345,13 +432,33 @@ class LiveGateway:
         result = None
         while not tracker.exhausted:
             tracker.advance()
-            record = self._adapter.dispatch(grounded)
+            # type/key are non-idempotent: re-dispatching on a failed verdict
+            # appends/duplicates the input. Never re-dispatch them — re-observe
+            # and re-verify instead (the action may have landed and the
+            # verification was wrong).
+            if tracker.attempts == 1 or action.type not in (ActionType.TYPE, ActionType.KEY):
+                record = self._adapter.dispatch(grounded)
+                time.sleep(SETTLE_SECONDS.get(action.type, 0.6))
             post = self._observe_for_act()
             result = self._verifier.verify(
                 post,
                 expected_postcondition,
                 force_source="vision" if tracker.attempts >= 2 else None,
             )
+            if not record.dispatched:
+                error = str(record.raw_result.get("error", "dispatch failed"))
+                result = VerificationResult(
+                    verdict=Verdict.FAIL,
+                    evidence={
+                        "expected": expected_postcondition,
+                        "actual_text": error,
+                        "actual_text_length": len(error),
+                        "match": False,
+                        "matched_fragments": [],
+                        "reason": "dispatch_failed",
+                    },
+                    source_used=result.source_used,
+                )
             append_event(
                 self._logs_dir,
                 session_id=session_id,
@@ -415,6 +522,12 @@ class LiveGateway:
             "source_used": result.source_used,
         }
 
+    def _get_client(self):
+        from gateway.executor.model_client import get_client
+
+        self._model_client = get_client()
+        return self._model_client
+
     def _observe_for_act(self) -> Observation:
         shot = self._adapter.capture_screen(self._logs_dir / "act.png")
         app = self._adapter.active_app()
@@ -432,11 +545,11 @@ class LiveGateway:
     def _ground(self, action: Action, observation: Observation) -> Action:
         """Fill in resolved coordinates where the planner only gave a hint."""
         if action.type in POINT_TYPES and "point" not in action.params:
-            from gateway.executor.model_client import ModelClientError, UiTarsMLXClient
+            from gateway.executor.model_client import ModelClientError
 
             from shared.action_schema import Screenshot
 
-            client = UiTarsMLXClient()
+            client = self._model_client or self._get_client()
             try:
                 grounded = client.infer(
                     Screenshot(
@@ -458,6 +571,40 @@ class LiveGateway:
             )
             return grounded
         return action
+
+
+MAX_TREE_NODES = 400
+
+
+def _trim_tree(tree: dict[str, Any] | None, budget: int = MAX_TREE_NODES) -> tuple[dict[str, Any] | None, bool]:
+    """Depth-first cap on serialized AX nodes.
+
+    A full macOS tree (VS Code, browsers, etc.) can be tens of thousands of
+    nodes — it blows up planner context, especially for text-only models.
+    The frontmost containers (window, toolbar, main content) survive the
+    cut; deep leaves beyond the budget are dropped.
+    """
+    if tree is None:
+        return None, False
+    counter = {"n": 0}
+    truncated = {"flag": False}
+
+    def walk(node: dict[str, Any]) -> dict[str, Any]:
+        counter["n"] += 1
+        if counter["n"] > budget:
+            truncated["flag"] = True
+            return {"role": "…", "title": "…", "description": "…", "value": "", "frame": None, "children": []}
+        children = []
+        for child in node.get("children") or []:
+            if counter["n"] >= budget:
+                truncated["flag"] = True
+                break
+            children.append(walk(child))
+        out = dict(node)
+        out["children"] = children
+        return out
+
+    return walk(tree), truncated["flag"]
 
 
 def _resolve_action(action_data: dict[str, Any]) -> Action:
@@ -541,7 +688,8 @@ def build_server() -> Server:
 
         try:
             if name == "gui.observe":
-                result = _LIVE_GATEWAY.observe(
+                result = await asyncio.to_thread(
+                    _LIVE_GATEWAY.observe,
                     arguments.get("session_id", ""),
                     arguments.get("prefer_source", "auto"),
                 )
@@ -553,7 +701,8 @@ def build_server() -> Server:
                 if action.get("type") not in ACT_TYPES:
                     return [types.TextContent(type="text", text=json.dumps(_missing("action.type"), indent=2))]
                 try:
-                    result = _LIVE_GATEWAY.act(
+                    result = await asyncio.to_thread(
+                        _LIVE_GATEWAY.act,
                         arguments.get("session_id", ""),
                         action,
                         arguments["expected_postcondition"],
@@ -565,7 +714,7 @@ def build_server() -> Server:
             if name == "gui.verify":
                 if not arguments.get("action_id"):
                     return [types.TextContent(type="text", text=json.dumps(_missing("action_id"), indent=2))]
-                result = _LIVE_GATEWAY.verify(arguments.get("session_id", ""), arguments["action_id"])
+                result = await asyncio.to_thread(_LIVE_GATEWAY.verify, arguments.get("session_id", ""), arguments["action_id"])
                 if result is None:
                     return [types.TextContent(type="text", text=json.dumps(_error(f"unknown action_id: {arguments['action_id']}"), indent=2))]
                 return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -585,7 +734,7 @@ async def amain() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     asyncio.run(amain())
 
 

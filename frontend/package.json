@@ -4,7 +4,7 @@
   "private": true,
   "description": "Control frontend for the OpenCode Computer-Use Platform — spawns opencode serve, launches apps, streams the agent's live screen and activity feed",
   "scripts": {
-    "build": "vite build web --outDir dist --emptyOutDir",
+    "build": "vite build",
     "dev": "vite web",
     "start": "node server/index.js",
     "test:smoke": "node scripts/smoke-test.js"

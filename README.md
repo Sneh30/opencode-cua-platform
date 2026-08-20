@@ -10,6 +10,34 @@ MCP, with structural verification and recovery. Docs (source of truth):
 
 ## Status
 
+**Verification overhaul (2026-08-20):** the #1 failure source fixed. Session
+logs showed 73% of actions failing (browser 100%, gateway ~50%) even though
+the actions *worked* — the verifier did an exact-substring match of the
+planner's whole natural-language sentence against AX/DOM/OCR text
+("the browser is on example.com" is not a substring of
+"URL: https://example.com/"). Now:
+
+- `shared/verifier.py` extracts content fragments from postconditions —
+  quoted strings, URLs, domain names, capitalized proper nouns, digits —
+  and passes when the *content* is present in the evidence (strict: quoted
+  strings are mandatory, ≥50% of anchors must match, unanchored prose still
+  fails)
+- Browser Adapter verifies action-type-aware: navigate → URL/domain
+  present; extract → non-empty extraction results; type → live input value
+  read from the DOM via XPath (input values were invisible to DOM text
+  before); dispatch failures are always FAIL; wrong-URL postconditions
+  (e.g. "on wikipedia.org" while on example.com) still FAIL
+- Browser Adapter exposes indexed interactive elements (`elements` array in
+  `browser.observe`); click indexes normalized to browser-use's 1-based
+  scheme (previously click validation errored on index 0 — clicks were
+  impossible, so the planner only ever navigated/extracted)
+- Gateway: settle delay after CGEvent dispatch before evidence read-back;
+  dispatch failures are always FAIL
+- Verified live on macOS (2026-08-20): browser navigate/extract/click/type
+  pass on attempt 1; gateway click "2" in Calculator (display genuinely
+  shows 2) and type in TextEdit pass on attempt 1; wrong-target postconditions
+  still exhaust recovery correctly. 89 unit tests pass
+
 **Milestone M6 (Frontend — Computer-Use control UI): done.** Verified on macOS (2026-08-19):
 
 - `frontend/` — React + Vite panel (dark theme) over a zero-dependency Node

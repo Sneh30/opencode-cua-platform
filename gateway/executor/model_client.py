@@ -23,6 +23,7 @@ import logging
 import math
 import os
 import re
+import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -283,16 +284,41 @@ class UiTarsMLXClient(ModelClient):
         self._model = None
         self._processor = None
         self._config = None
+        self._lock = threading.RLock()
+        self.warmup_started = False
+
+    def warmup(self) -> None:
+        """Load the model in the background (idempotent, daemon thread).
+
+        The first `infer` call otherwise pays the full load cost (10+ min
+        cold, ~16s cached) inside the MCP request window. Called once at
+        gateway startup so the model is ready by the time the planner
+        issues its first `gui.act`.
+        """
+        with self._lock:
+            if self.warmup_started or self._model is not None:
+                return
+            self.warmup_started = True
+
+        def _load_and_report() -> None:
+            try:
+                self._ensure_loaded()
+                logger.info("UI-TARS warmup complete: model loaded")
+            except Exception:
+                logger.exception("UI-TARS warmup failed; first infer will retry load")
+
+        threading.Thread(target=_load_and_report, name="uitars-warmup", daemon=True).start()
 
     def _ensure_loaded(self):
-        if self._model is None:
-            self._force_offline_if_cached()
-            from mlx_vlm import load
-            from mlx_vlm.prompt_utils import apply_chat_template  # noqa: F401
-            from mlx_vlm.utils import load_config
+        with self._lock:
+            if self._model is None:
+                self._force_offline_if_cached()
+                from mlx_vlm import load
+                from mlx_vlm.prompt_utils import apply_chat_template  # noqa: F401
+                from mlx_vlm.utils import load_config
 
-            self._model, self._processor = load(self.model_id)
-            self._config = load_config(self.model_id)
+                self._model, self._processor = load(self.model_id)
+                self._config = load_config(self.model_id)
 
     @staticmethod
     def _force_offline_if_cached() -> None:
@@ -319,6 +345,10 @@ class UiTarsMLXClient(ModelClient):
         return model_id.replace("/", "--")
 
     def infer(self, screenshot: Screenshot, instruction: str, history: list[str] | None = None) -> Action:
+        with self._lock:
+            return self._infer_locked(screenshot, instruction, history)
+
+    def _infer_locked(self, screenshot: Screenshot, instruction: str, history: list[str] | None = None) -> Action:
         self._ensure_loaded()
         from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template

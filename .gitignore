@@ -12,3 +12,6 @@ logs/
 
 # frontend deps
 frontend/node_modules/
+
+# frontend build output
+frontend/dist/

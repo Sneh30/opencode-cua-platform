@@ -4,7 +4,16 @@ from shared.action_schema import (
     ObservationSource,
     Verdict,
 )
-from shared.verifier import ax_text, best_available_source, verify, verify_text
+from shared.verifier import (
+    ax_text,
+    best_available_source,
+    extract_fragments,
+    has_verifiable_anchors,
+    matched_fragments,
+    normalize,
+    verify,
+    verify_text,
+)
 
 
 class TestVerifyText:
@@ -22,6 +31,92 @@ class TestVerifyText:
 
     def test_uncertain_empty_actual(self):
         assert verify_text("", "report.pdf") is Verdict.UNCERTAIN
+
+    # -- regression: natural-language postconditions from real sessions ------
+
+    def test_prose_with_domain_passes_when_url_present(self):
+        actual = "URL: https://example.com/ | Title: example.com | a Learn more"
+        assert verify_text(actual, "the browser is on example.com") is Verdict.PASS
+
+    def test_prose_with_url_passes_when_url_present(self):
+        actual = "URL: https://example.com/ | Title: example.com | a Learn more"
+        assert (
+            verify_text(actual, "The page URL is https://example.com and the page has loaded")
+            is Verdict.PASS
+        )
+
+    def test_prose_with_quote_and_domain_passes(self):
+        actual = "URL: https://example.com/ | Title: Example Domain | a Learn more"
+        assert (
+            verify_text(
+                actual,
+                "The browser is at example.com and the page contains the heading 'Example Domain'",
+            )
+            is Verdict.PASS
+        )
+
+    def test_prose_with_quoted_word_passes_when_word_present(self):
+        actual = "TextEdit Untitled 2 iPhone bold italic underline strikethrough"
+        assert (
+            verify_text(actual, 'The word "iPhone" is visible in the Untitled 2 document')
+            is Verdict.PASS
+        )
+
+    def test_prose_with_proper_noun_passes(self):
+        actual = "TextEdit Untitled 2 bold italic underline strikethrough"
+        assert (
+            verify_text(actual, "A new untitled TextEdit document window is open, replacing the Open dialog")
+            is Verdict.PASS
+        )
+
+    def test_prose_with_proper_noun_and_digit_passes(self):
+        actual = "TextEdit Untitled 2 bold italic underline strikethrough"
+        assert (
+            verify_text(actual, "The text insertion caret is placed inside the Untitled 2 text area")
+            is Verdict.PASS
+        )
+
+    def test_prose_with_number_passes_when_digit_present(self):
+        actual = "Calculator Calculator 2 Swap Rotate stack down Drop Delete Clear"
+        assert verify_text(actual, "The calculator display shows the number 2") is Verdict.PASS
+
+    def test_prose_still_fails_when_no_fragment_present(self):
+        actual = "TextEdit Untitled 2 bold italic underline strikethrough"
+        assert verify_text(actual, "The calculator display shows the number 7") is Verdict.FAIL
+
+    def test_quoted_string_must_be_present(self):
+        actual = "URL: https://example.com/ | Title: Example Domain | a Learn more"
+        assert (
+            verify_text(actual, "the page contains the text 'Welcome to the site'")
+            is Verdict.FAIL
+        )
+
+
+class TestFragments:
+    def test_extracts_anchors(self):
+        frags = extract_fragments(
+            "The browser is at example.com and the page contains the heading 'Example Domain'"
+        )
+        assert "example.com" in frags["domains"]
+        assert "Example Domain" in frags["quotes"]
+
+    def test_proper_noun_extraction_skips_sentence_start(self):
+        frags = extract_fragments("A new untitled TextEdit document window is open")
+        assert "textedit" in frags["proper"]
+        assert "new" not in frags["proper"]
+
+    def test_has_verifiable_anchors(self):
+        assert has_verifiable_anchors("the browser is on example.com")
+        assert has_verifiable_anchors('the page contains "Welcome"')
+        assert not has_verifiable_anchors("the page loads")
+        assert not has_verifiable_anchors("The page has loaded")
+
+    def test_matched_fragments(self):
+        actual = "URL: https://example.com/ | Title: example.com | a Learn more"
+        assert matched_fragments(actual, "the browser is on example.com") == ["example.com"]
+
+    def test_normalize(self):
+        assert normalize("  Hello   World ") == "hello world"
 
 
 class TestAxText:

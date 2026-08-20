@@ -83,8 +83,15 @@ class BrowserDispatcher:
     async def _click(self, action: Action) -> ActionRecord:
         index = action.params.get("index")
         if index is None:
-            raise BrowserDispatchError("click requires 'index' in params")
-        am = self._model()(click={"index": int(index)})
+            raise BrowserDispatchError(
+                "click requires 'index' in params (1-based element index from browser.observe)"
+            )
+        index = int(index)
+        if index < 1:
+            # browser-use 0.13.8 click indexes are 1-based (ge=1); tolerate
+            # planners that pass a 0-based first element.
+            index = 1
+        am = self._model()(click={"index": index})
         result = await self._controller.act(am, browser_session=self._session)
         return ActionRecord(
             action_id="",
@@ -205,6 +212,37 @@ class BrowserDispatcher:
             dispatched=True,
             raw_result={"keys": keys, "result": str(result)},
         )
+
+    async def read_element_value(self, index: int) -> str:
+        """Live `value`/text of the interactive element at `index`.
+
+        The DOM state's serialized text does not include input values, so
+        type verification reads the element directly. Returns "" when the
+        element is gone or lives in another frame.
+        """
+        try:
+            state = await self._session.get_browser_state_summary()
+            element = state.dom_state.selector_map.get(int(index))
+            if element is None:
+                return ""
+            xpath = element.xpath
+            page = await self._session.must_get_current_page()
+            return str(
+                await page.evaluate(
+                    """(xp) => {
+                        const el = document.evaluate(
+                            xp, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+                        ).singleNodeValue;
+                        if (!el) return '';
+                        if (el.value !== undefined) return el.value;
+                        return el.textContent || '';
+                    }""",
+                    xpath,
+                )
+            )
+        except Exception:
+            logger.exception("read_element_value(%s) failed", index)
+            return ""
 
 
 def create_browser_session(

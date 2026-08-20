@@ -25,6 +25,7 @@ from ApplicationServices import (
     kAXValueAttribute,
     kAXValueCGPointType,
     kAXValueCGSizeType,
+    kAXWindowsAttribute,
     kAXErrorSuccess,
 )
 from Quartz import (
@@ -39,6 +40,10 @@ from Quartz import (
     CGEventPost,
     CGEventSetFlags,
     CGEventSetIntegerValueField,
+    CGWindowListCopyWindowInfo,
+    kCGWindowListExcludeDesktopElements,
+    kCGWindowListOptionOnScreenOnly,
+    kCGNullWindowID,
     kCGEventLeftMouseDown,
     kCGEventLeftMouseDragged,
     kCGEventLeftMouseUp,
@@ -50,6 +55,10 @@ from Quartz import (
     kCGMouseButtonRight,
     kCGMouseEventClickState,
     kCGScrollEventUnitLine,
+    kCGWindowBounds,
+    kCGWindowLayer,
+    kCGWindowOwnerName,
+    kCGWindowOwnerPID,
 )
 from AppKit import (
     NSApplicationActivationPolicyRegular,
@@ -140,8 +149,25 @@ class MacOSAdapter(OSAdapter):
         )
 
     def active_app(self) -> AppInfo | None:
+        """The frontmost application, queried live from the WindowServer.
+
+        `NSWorkspace.frontmostApplication()` is only accurate when the
+        process receives workspace activation notifications — a long-lived
+        MCP server with no run loop never gets them and can report an app
+        that was frontmost minutes ago. `CGWindowListCopyWindowInfo` is a
+        live query (windows listed front-to-back), so it is the source of
+        truth here; `frontmostApplication` is only the fallback.
+        """
         ws = NSWorkspace.sharedWorkspace()
-        app = ws.frontmostApplication()
+        pid = self._frontmost_window_owner()
+        app = None
+        if pid is not None:
+            for running in ws.runningApplications():
+                if int(running.processIdentifier()) == pid:
+                    app = running
+                    break
+        if app is None:
+            app = ws.frontmostApplication()
         if app is None:
             return None
         return AppInfo(
@@ -150,6 +176,43 @@ class MacOSAdapter(OSAdapter):
             bundle_id=str(app.bundleIdentifier() or ""),
             is_active=True,
         )
+
+    # Owners that never represent the frontmost app window.
+    _WINDOW_OWNER_BLACKLIST = frozenset(
+        {
+            "Window Server",
+            "WindowManager",
+            "Control Center",
+            "Dock",
+            "SystemUIServer",
+            "loginwindow",
+            "Spotlight",
+            "TextInputMenuAgent",
+        }
+    )
+
+    def _frontmost_window_owner(self) -> int | None:
+        """PID of the app owning the topmost normal on-screen window."""
+        try:
+            info = CGWindowListCopyWindowInfo(
+                kCGWindowListOptionOnScreenOnly
+                | kCGWindowListExcludeDesktopElements,
+                kCGNullWindowID,
+            )
+        except Exception:
+            return None
+        for win in info or []:
+            if win.get(kCGWindowLayer, 0) != 0:
+                continue
+            bounds = win.get(kCGWindowBounds, {}) or {}
+            width, height = int(bounds.get("Width", 0)), int(bounds.get("Height", 0))
+            if width < 50 or height < 50:
+                continue  # transient overlays (gesture blockers, icons)
+            owner = win.get(kCGWindowOwnerName, "") or ""
+            if owner in self._WINDOW_OWNER_BLACKLIST:
+                continue
+            return win.get(kCGWindowOwnerPID)
+        return None
 
     def list_running_apps(self) -> list[AppInfo]:
         ws = NSWorkspace.sharedWorkspace()
@@ -164,6 +227,22 @@ class MacOSAdapter(OSAdapter):
                     )
                 )
         return apps
+
+    def window_titles(self, app: AppInfo) -> list[str]:
+        """Window titles for an app (kAXWindowsAttribute), best-effort."""
+        try:
+            root = AXUIElementCreateApplication(app.pid)
+            err, windows = AXUIElementCopyAttributeValue(root, kAXWindowsAttribute, None)
+            if err != kAXErrorSuccess or windows is None:
+                return []
+            titles = []
+            for win in windows:
+                title = self._attr(win, kAXTitleAttribute)
+                if title:
+                    titles.append(str(title))
+            return titles
+        except Exception:
+            return []
 
     def accessibility_state(self, app: AppInfo) -> AccessibilityState:
         if not AXIsProcessTrusted():
@@ -294,7 +373,7 @@ class MacOSAdapter(OSAdapter):
         elif t == ActionType.TYPE:
             self.type_text(action.params.get("text", ""))
         elif t == ActionType.KEY:
-            self._key_combo(action.params.get("key", ""))
+            self._key_combo(action.params.get("key", ""), action.params.get("modifiers"))
         else:
             raise OSAdapterError(f"unsupported action type: {t}")
         return ActionRecord(
@@ -372,7 +451,9 @@ class MacOSAdapter(OSAdapter):
             CGEventKeyboardSetUnicodeString(ev_up, len(ch.encode("utf-16-le")) // 2, ch)
             self._post(ev_up)
 
-    def _key_combo(self, combo: str) -> None:
+    def _key_combo(self, combo: str, modifiers: list[str] | None = None) -> None:
+        if modifiers:
+            combo = "+".join([*modifiers, combo])
         keycode, flags = parse_key_combo(combo)
         down = CGEventCreateKeyboardEvent(None, keycode, True)
         CGEventSetFlags(down, flags)

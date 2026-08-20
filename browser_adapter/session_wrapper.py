@@ -96,6 +96,7 @@ class BrowserSessionWrapper:
                 "url": state.url,
                 "title": state.title,
                 "dom_text": dom_text[:5000],  # Truncate for size
+                "elements": self._indexed_elements(state),
                 "tabs": [
                     {
                         "url": tab.url,
@@ -121,6 +122,35 @@ class BrowserSessionWrapper:
                 "viewport_height": self._viewport["height"],
             },
         )
+
+    def _indexed_elements(self, state) -> list[dict[str, Any]]:
+        """Interactive elements with their 1-based browser-use indexes.
+
+        `browser.act` click/type/select/scroll actions address elements by
+        this index — without it the planner cannot target anything.
+        """
+        dom_state = getattr(state, "dom_state", None)
+        selector_map = (dom_state.selector_map if dom_state else None) or {}
+        elements: list[dict[str, Any]] = []
+        for index, element in selector_map.items():
+            try:
+                text = element.get_all_children_text()
+            except Exception:
+                text = ""
+            attrs = {
+                k: v
+                for k, v in (getattr(element, "attributes", None) or {}).items()
+                if v
+            }
+            elements.append(
+                {
+                    "index": index,
+                    "tag_name": element.tag_name,
+                    "text": (text or "").strip()[:200],
+                    "attributes": attrs,
+                }
+            )
+        return elements
 
     async def take_screenshot(self, output_path: str | Path | None = None) -> Screenshot:
         """Capture a screenshot and return a Screenshot object."""

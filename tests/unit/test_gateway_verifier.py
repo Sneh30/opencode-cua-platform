@@ -165,18 +165,21 @@ class TestLiveGateway:
         assert gw.verify("s1", "nope") is None
 
     def test_click_grounds_when_no_point(self, tmp_path):
-        adapter = FakeAdapter(tmp_path)
-        gw = LiveGateway(adapter, tmp_path / "logs")
+        import gateway.executor.model_client as mc
 
         class StubClient:
+            model_id = "mlx-community/UI-TARS-1.5-7B-4bit"
             def infer(self, screenshot, instruction):
                 return Action(type=ActionType.CLICK, target_hint=instruction, params={"point": [10, 20]})
 
-        import gateway.executor.model_client as mc
-
-        mc.UiTarsMLXClient = lambda: StubClient()
-        gw.act("s1", {"type": "click", "target_hint": "the button"}, "anything")
-        assert adapter.dispatched[-1].params["point"] == [10, 20]
+        mc._CLIENT = StubClient()
+        try:
+            adapter = FakeAdapter(tmp_path)
+            gw = LiveGateway(adapter, tmp_path / "logs")
+            gw.act("s1", {"type": "click", "target_hint": "the button"}, "anything")
+            assert adapter.dispatched[-1].params["point"] == [10, 20]
+        finally:
+            mc._CLIENT = None
 
     def test_type_action_skips_grounding(self, tmp_path):
         adapter = FakeAdapter(tmp_path)

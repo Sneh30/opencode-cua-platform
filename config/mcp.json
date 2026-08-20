@@ -5,6 +5,10 @@
       "type": "local",
       "command": ["uv", "run", "--project", "gateway", "cua-gateway"],
       "cwd": ".",
+      "environment": {
+        "CUA_GATEWAY_LIVE": "1"
+      },
+      "timeout": 600000,
       "enabled": true
     }
   }
