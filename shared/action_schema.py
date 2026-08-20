@@ -94,6 +94,7 @@ class Screenshot:
     captured_at: str
     display_width: int | None = None
     display_height: int | None = None
+    sha: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -103,6 +104,7 @@ class Screenshot:
             "captured_at": self.captured_at,
             "display_width": self.display_width,
             "display_height": self.display_height,
+            "sha": self.sha,
         }
 
 

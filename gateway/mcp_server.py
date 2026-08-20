@@ -44,15 +44,19 @@ from shared.action_schema import (
 
 logger = logging.getLogger("cua_gateway")
 
-# Settle time after a CGEvent dispatch before the evidence read-back.
+# Settle cap after a CGEvent dispatch before the evidence read-back. The
+# settle is *adaptive*: it polls the screen content hash and exits the
+# instant the UI changes, so fast updates cost a fraction of these caps.
+# They are caps, not fixed sleeps — a click that opens a dialog returns in
+# ~300ms; a no-op click burns the cap and recovery kicks in.
 SETTLE_SECONDS = {
-    ActionType.CLICK: 0.6,
-    ActionType.DOUBLE_CLICK: 0.6,
-    ActionType.RIGHT_CLICK: 0.6,
-    ActionType.DRAG: 0.8,
-    ActionType.TYPE: 0.8,
-    ActionType.KEY: 0.5,
-    ActionType.SCROLL: 0.5,
+    ActionType.CLICK: 1.2,
+    ActionType.DOUBLE_CLICK: 1.2,
+    ActionType.RIGHT_CLICK: 1.2,
+    ActionType.DRAG: 1.4,
+    ActionType.TYPE: 1.0,
+    ActionType.KEY: 0.8,
+    ActionType.SCROLL: 0.8,
 }
 
 LIVE = os.environ.get("CUA_GATEWAY_LIVE") == "1"
@@ -335,6 +339,7 @@ class LiveGateway:
         self._store = SessionStore()
         self._verifier = GatewayVerifier(adapter)
         self._model_client = None
+        self._pre_dispatch_sha: str | None = None
         try:
             from gateway.executor.model_client import get_client
 
@@ -421,6 +426,7 @@ class LiveGateway:
         tracker = RecoveryTracker(budget)
         action = _resolve_action(action_data)
         grounded = self._ground(action, self._observe_for_act())
+        self._pre_dispatch_sha = getattr(self._adapter, "_last_sha", None)
         append_event(
             self._logs_dir,
             session_id=session_id,
@@ -438,7 +444,7 @@ class LiveGateway:
             # verification was wrong).
             if tracker.attempts == 1 or action.type not in (ActionType.TYPE, ActionType.KEY):
                 record = self._adapter.dispatch(grounded)
-                time.sleep(SETTLE_SECONDS.get(action.type, 0.6))
+                self._settle(action.type, self._pre_dispatch_sha)
             post = self._observe_for_act()
             result = self._verifier.verify(
                 post,
@@ -527,6 +533,19 @@ class LiveGateway:
 
         self._model_client = get_client()
         return self._model_client
+
+    def _settle(self, action_type: ActionType, pre_dispatch_sha: str | None) -> None:
+        """Wait for the UI to react to a dispatch — but exit the instant the
+        screen content changes, so fast renders cost ~one capture instead of
+        a full fixed sleep. `SETTLE_SECONDS` is the hard cap."""
+        cap = SETTLE_SECONDS.get(action_type, 0.6)
+        deadline = time.monotonic() + cap
+        while time.monotonic() < deadline:
+            if getattr(self._adapter, "screen_hash", None):
+                current = self._adapter.screen_hash()
+                if current not in (None, pre_dispatch_sha):
+                    return  # the screen changed → the action landed
+            time.sleep(0.15)
 
     def _observe_for_act(self) -> Observation:
         shot = self._adapter.capture_screen(self._logs_dir / "act.png")

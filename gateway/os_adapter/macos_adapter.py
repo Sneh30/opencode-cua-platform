@@ -6,6 +6,7 @@ Decision #11). Everything above this layer is platform-agnostic.
 
 from __future__ import annotations
 
+import hashlib
 import time
 import uuid
 from pathlib import Path
@@ -88,6 +89,14 @@ from shared.action_schema import (
 class MacOSAdapter(OSAdapter):
     """Concrete macOS implementation (pyobjc)."""
 
+    def __init__(self):
+        # OCR is the slowest part of an observation (~1s Accurate vs ~80ms
+        # Fast). Screenshots rarely change between consecutive observes, so
+        # cache OCR text keyed by the screenshot content hash.
+        self._shot_sha: dict[str, str] = {}
+        self._ocr_cache: dict[str, str] = {}
+        self._last_sha: str | None = None
+
     def capabilities(self) -> AdapterCapabilities:
         ax_trusted = bool(AXIsProcessTrusted())
         screen_ok = False
@@ -121,7 +130,7 @@ class MacOSAdapter(OSAdapter):
         if data is None or not data.writeToFile_atomically_(str(output_path), True):
             raise OSAdapterError(f"PNG write failed at {output_path}")
         bounds = CGDisplayBounds(CGMainDisplayID())
-        return Screenshot(
+        shot = Screenshot(
             ref=str(output_path),
             width=int(rep.pixelsWide()),
             height=int(rep.pixelsHigh()),
@@ -129,24 +138,61 @@ class MacOSAdapter(OSAdapter):
             display_width=int(bounds.size.width),
             display_height=int(bounds.size.height),
         )
+        # Content hash for the OCR cache + adaptive-settle change detection.
+        try:
+            sha = hashlib.sha256(data).hexdigest()
+            self._shot_sha[str(output_path)] = sha
+            self._last_sha = sha
+            shot.sha = sha
+        except Exception:
+            pass
+        return shot
+
+    def screen_hash(self) -> str | None:
+        """Content hash of the current screen (no disk write).
+
+        Used by the adaptive settle to detect that a dispatched action
+        changed the UI, so the wait exits as soon as the change lands.
+        """
+        try:
+            cg = CGDisplayCreateImage(CGMainDisplayID())
+            if cg is None:
+                return None
+            rep = NSBitmapImageRep.alloc().initWithCGImage_(cg)
+            data = rep.representationUsingType_properties_(NSBitmapImageFileTypePNG, None)
+            if data is None:
+                return None
+            return hashlib.sha256(data).hexdigest()
+        except Exception:
+            return None
 
     def ocr_screenshot(self, screenshot: Screenshot) -> str:
         """Vision-framework OCR of a captured screenshot (vision fallback
-        for the verifier, Architecture §12). Space-joined recognized lines."""
+        for the verifier, Architecture §12). Fast recognition level plus a
+        content-hash cache: re-reading an unchanged screenshot is free,
+        which makes consecutive observes and act-verifies cost ~nothing."""
         import Vision
         from Foundation import NSURL
 
+        sha = screenshot.sha or self._shot_sha.get(screenshot.ref or "")
+        if sha and sha in self._ocr_cache:
+            return self._ocr_cache[sha]
+        if screenshot.ref and not Path(screenshot.ref).exists():
+            return ""
         handler = Vision.VNImageRequestHandler.alloc().initWithURL_options_(
             NSURL.fileURLWithPath_(screenshot.ref), None
         )
         req = Vision.VNRecognizeTextRequest.alloc().init()
-        req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+        req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelFast)
         ok, err = handler.performRequests_error_([req], None)
         if not ok:
             return ""
-        return " ".join(
+        text = " ".join(
             obs.topCandidates_(1)[0].string() for obs in (req.results() or [])
         )
+        if sha:
+            self._ocr_cache[sha] = text
+        return text
 
     def active_app(self) -> AppInfo | None:
         """The frontmost application, queried live from the WindowServer.
