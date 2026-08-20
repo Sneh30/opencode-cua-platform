@@ -9,7 +9,20 @@ function MCPChip({ name, status }) {
   );
 }
 
-export default function StatusBar({ connected, healthy, version, gatewayOk, browserOk, mcp, busy, screenEnabled, onToggleScreen }) {
+export default function StatusBar({
+  connected,
+  healthy,
+  version,
+  gatewayOk,
+  browserOk,
+  mcp,
+  busy,
+  screenEnabled,
+  lifecycleBusy,
+  onToggleScreen,
+  onStop,
+  onStart,
+}) {
   return (
     <header className="statusbar">
       <div className="brand">
@@ -19,7 +32,7 @@ export default function StatusBar({ connected, healthy, version, gatewayOk, brow
       </div>
       <div className="status-mid">
         <span className={`dot ${connected ? "dot-on" : "dot-off"}`} />
-        <span className="status-text">{connected ? "control server connected" : "reconnecting…"}</span>
+        <span className="status-text">{connected ? (healthy ? "running" : "stopped") : "reconnecting…"}</span>
         {healthy && <span className="status-text muted">opencode {version}</span>}
         <MCPChip name="cua-gateway" status={gatewayOk ? "connected" : connected ? "failed" : "disabled"} />
         <MCPChip name="browser-adapter" status={browserOk ? "connected" : connected ? "failed" : "disabled"} />
@@ -29,6 +42,25 @@ export default function StatusBar({ connected, healthy, version, gatewayOk, brow
         <button className={`btn btn-mini ${screenEnabled ? "" : "btn-dim"}`} onClick={() => onToggleScreen(!screenEnabled)} title="Toggle live screen capture">
           📷 {screenEnabled ? "screen on" : "screen off"}
         </button>
+        {healthy ? (
+          <button
+            className="btn btn-mini btn-stop"
+            onClick={onStop}
+            disabled={lifecycleBusy}
+            title="Stop opencode and screen capture NOW (kills the whole process group instantly)"
+          >
+            {lifecycleBusy ? "stopping…" : "⏹ STOP"}
+          </button>
+        ) : (
+          <button
+            className="btn btn-mini btn-start"
+            onClick={onStart}
+            disabled={lifecycleBusy}
+            title="Start opencode + screen capture"
+          >
+            {lifecycleBusy ? "starting…" : "▶ START"}
+          </button>
+        )}
       </div>
     </header>
   );

@@ -26,6 +26,7 @@ function initState() {
     busy: false,
     opencodeLogs: [],
     screenEnabled: true,
+    lifecycleBusy: false,
   };
 }
 
@@ -79,7 +80,6 @@ function reducer(state, action) {
         ...state,
         meta,
         busy: meta.busy ?? state.busy,
-        screenEnabled: true,
         gatewayShots: meta.gatewayLogs?.screenshots || state.gatewayShots,
         gatewayLogs: meta.gatewayLogs?.files || state.gatewayLogs,
         mcpMeta: undefined,
@@ -169,6 +169,13 @@ function reducer(state, action) {
       return { ...state, screenError: action.properties.error };
     case "screen.toggled":
       return { ...state, screenEnabled: action.enabled };
+    case "lifecycle":
+      return { ...state, lifecycleBusy: action.busy };
+    case "toast":
+      return {
+        ...state,
+        toasts: [...state.toasts.slice(-6), { id: Date.now(), kind: action.kind || "error", text: action.text }],
+      };
     case "app.launched":
       return {
         ...state,
@@ -303,6 +310,30 @@ export default function App() {
     await api.settings({ screenCaptureEnabled: v });
   };
 
+  const stopEverything = async () => {
+    dispatch({ type: "lifecycle", busy: true });
+    try {
+      await api.stop();
+      dispatch({ type: "screen.toggled", enabled: false });
+    } catch (err) {
+      dispatch({ type: "toast", text: `Stop failed: ${err.message}`, kind: "error" });
+    } finally {
+      dispatch({ type: "lifecycle", busy: false });
+    }
+  };
+
+  const startEverything = async () => {
+    dispatch({ type: "lifecycle", busy: true });
+    try {
+      await api.start();
+      dispatch({ type: "screen.toggled", enabled: true });
+    } catch (err) {
+      dispatch({ type: "toast", text: `Start failed: ${err.message}`, kind: "error" });
+    } finally {
+      dispatch({ type: "lifecycle", busy: false });
+    }
+  };
+
   const dismissToast = (id) => dispatch({ type: "toast-dismiss", id });
 
   const mcp = state.meta?.mcp || {};
@@ -320,7 +351,10 @@ export default function App() {
         mcp={mcp}
         busy={state.busy}
         screenEnabled={state.screenEnabled}
+        lifecycleBusy={state.lifecycleBusy}
         onToggleScreen={toggleScreen}
+        onStop={stopEverything}
+        onStart={startEverything}
       />
 
       <div className="toasts">

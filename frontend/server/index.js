@@ -353,6 +353,9 @@ async function handleApi(req, res, url) {
 
   // -- screen -----------------------------------------------------------
   if (pathname === "/api/screen.jpg" && req.method === "GET") {
+    if (!state.screenCaptureEnabled) {
+      return sendJson(res, 409, { error: "screen capture stopped" });
+    }
     const shot = await screen.capture();
     const file = screen.screenFile();
     if (!file) return sendJson(res, 500, { error: shot.error || "no capture" });
@@ -381,6 +384,35 @@ async function handleApi(req, res, url) {
   // -- gateway logs -----------------------------------------------------
   if (pathname === "/api/logs" && req.method === "GET") {
     return sendJson(res, 200, state.logs ? state.logs.snapshot() : { files: {}, screenshots: {} });
+  }
+
+  // -- lifecycle: STOP / START ---------------------------------------
+  // STOP kills opencode + its MCP children (gateway screen capture,
+  // browser adapter) instantly via process-group SIGKILL, and halts the
+  // screen capture loop. START brings everything back. Both work even
+  // when opencode is down, so they sit before the running-guard below.
+  if (pathname === "/api/stop" && req.method === "POST") {
+    stopScreenLoop();
+    state.screenCaptureEnabled = false;
+    state.activeSession = null;
+    if (state.opencode) await state.opencode.stop();
+    state.opencode = null;
+    broadcast({ type: "meta.updated", properties: metaPayload() });
+    console.log("STOP requested — opencode + screen capture halted");
+    return sendJson(res, 200, { ok: true, stopped: true });
+  }
+
+  if (pathname === "/api/start" && req.method === "POST") {
+    state.screenCaptureEnabled = true;
+    startScreenLoop();
+    try {
+      await ensureOpencode();
+      broadcast({ type: "meta.updated", properties: metaPayload() });
+      console.log("START requested — opencode serving again");
+      return sendJson(res, 200, { ok: true, healthy: true });
+    } catch (err) {
+      return sendJson(res, 500, { ok: false, error: err.message });
+    }
   }
 
   // -- opencode passthrough ---------------------------------------------

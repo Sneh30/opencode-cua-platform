@@ -35,6 +35,8 @@ export const api = {
     }),
   logs: () => j("/api/logs"),
   settings: (patch) => j("/api/settings", { method: "POST", body: JSON.stringify(patch) }),
+  stop: () => j("/api/stop", { method: "POST", body: "{}" }),
+  start: () => j("/api/start", { method: "POST", body: "{}" }),
 };
 
 export function fmtTime(ts) {

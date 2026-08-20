@@ -326,6 +326,13 @@ body {
   opacity: 0.55;
 }
 
+.btn-start {
+  background: rgba(62, 214, 128, 0.14);
+  border-color: rgba(62, 214, 128, 0.5);
+  color: #7ce8ae;
+  font-weight: 600;
+}
+
 .icon-btn {
   background: none;
   border: none;

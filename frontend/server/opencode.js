@@ -43,6 +43,7 @@ class OpencodeServer extends EventEmitter {
    */
   async start({ port }) {
     if (this.running) return this._waitHealthy();
+    this._manuallyStopped = false;
     this.port = port;
     const args = [
       "serve",
@@ -55,6 +56,10 @@ class OpencodeServer extends EventEmitter {
       cwd: this.repoRoot,
       env: { ...process.env },
       stdio: ["ignore", "pipe", "pipe"],
+      // Own process group so stop() can SIGKILL opencode AND its children
+      // (the CUA Gateway / Browser Adapter MCP servers — i.e. the screen
+      // capture processes) in one instant kill.
+      detached: true,
     });
     this.proc.stdout.on("data", (d) => {
       const line = String(d).trim();
@@ -103,10 +108,29 @@ class OpencodeServer extends EventEmitter {
   async stop() {
     if (this._retryTimer) clearTimeout(this._retryTimer);
     this._retryTimer = null;
-    if (this.proc) {
-      this.proc.removeAllListeners("exit");
-      this.proc.kill("SIGTERM");
-      this.proc = null;
+    this._manuallyStopped = true;
+    const proc = this.proc;
+    this.proc = null;
+    this._sseConnected = false;
+    if (this._sseAbort) {
+      this._sseAbort.abort();
+      this._sseAbort = null;
+    }
+    if (!proc) return;
+    proc.removeAllListeners("exit");
+    try {
+      // SIGKILL the whole process group: opencode serve + every MCP
+      // server it spawned (gateway screen capture, browser adapter).
+      // This is the instant "everything off" the STOP button promises.
+      process.kill(-proc.pid, "SIGKILL");
+      this.emit("log", "[opencode] STOP: killed process group (SIGKILL)");
+    } catch (err) {
+      this.emit("log", `[opencode] STOP: group kill failed: ${err.message}`);
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+        /* already dead */
+      }
     }
   }
 
