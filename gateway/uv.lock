@@ -279,6 +279,7 @@ name = "cua-gateway"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "huggingface-hub" },
     { name = "jinja2" },
     { name = "mcp", extra = ["cli"] },
     { name = "mlx-vlm" },
@@ -295,6 +296,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "huggingface-hub", specifier = ">=0.30.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "mcp", extras = ["cli"], specifier = "==1.26.0" },
     { name = "mlx-vlm", specifier = ">=0.6.14" },
