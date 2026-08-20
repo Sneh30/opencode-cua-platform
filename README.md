@@ -10,6 +10,33 @@ MCP, with structural verification and recovery. Docs (source of truth):
 
 ## Status
 
+**Native app + instant STOP + speed (2026-08-20, M8–M10):**
+
+- **Speed:** OCR at the Fast recognition level (12× faster: ~1s → ~80ms),
+  content-hash-cached OCR (repeated observes of an unchanged screen are
+  free — 719ms → 311ms), and an adaptive settle that exits the instant the
+  screen changes after a dispatch (full act cycle 2.3s → ~0.9s, verified
+  live on Calculator click + verify)
+- **STOP/START lifecycle:** `POST /api/stop` SIGKILLs the whole opencode
+  process group — opencode serve + CUA Gateway (screen capture) + Browser
+  Adapter die instantly — and halts the screen capture loop (`/api/screen.jpg`
+  → 409). `POST /api/start` brings everything back. Red STOP / green START
+  buttons in the UI header
+- **Native macOS app (`native/build.sh` → `native/build/CUA.app`):** double-click
+  to launch. The app boots the control server → opencode serve → both MCP
+  servers, opens the full control UI (chat, live screen, logs, gateway trace)
+  in an embedded window — no browser tab, no URL. Toolbar: status indicator,
+  START, STOP. Quitting the app stops all services. Logs land in
+  `logs/control-server.out`. The app walks up from its bundle to find the
+  repo (or honors `CUA_PLATFORM_ROOT`)
+- **Reliable default model:** the control server now prefers
+  `deepseek-v4-flash-free` for tasks instead of the provider's raw default
+  (nemotron-3.5-lightning-free produced empty sessions — zero tool calls
+  for 9 minutes)
+- Verified end-to-end (2026-08-20): app launch → stack healthy → both MCP
+  servers connected → live task "open Calculator, type 7+8, report the
+  display" completed with a screen-grounded answer within 3 minutes
+
 **Verification overhaul (2026-08-20):** the #1 failure source fixed. Session
 logs showed 73% of actions failing (browser 100%, gateway ~50%) even though
 the actions *worked* — the verifier did an exact-substring match of the

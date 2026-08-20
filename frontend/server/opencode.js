@@ -69,6 +69,11 @@ class OpencodeServer extends EventEmitter {
       const line = String(d).trim();
       if (line) this.emit("log", `[opencode:err] ${line}`);
     });
+    this.proc.on("error", (err) => {
+      this.emit("log", `[opencode] spawn failed: ${err.message} (is 'opencode' on PATH?)`);
+      this.proc = null;
+      this._scheduleRestart();
+    });
     this.proc.on("exit", (code, sig) => {
       this.emit("log", `[opencode] exited code=${code} sig=${sig}`);
       this.emit("exit", { code, sig });

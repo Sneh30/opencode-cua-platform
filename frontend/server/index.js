@@ -138,10 +138,14 @@ async function refreshMeta() {
     }
     state.models = models;
     const def = prov.default || {};
-    state.defaultModel = models.length
-      ? models.find((m) => m.providerID === def.opencode)
-        || models[0]
-      : null;
+    // Prefer a model proven reliable for agentic GUI work over the
+    // provider's raw default (free-tier defaults can hang or return
+    // empty sessions — seen with nemotron-3.5-lightning-free).
+    const preferred = ["deepseek-v4-flash-free"];
+    state.defaultModel =
+      models.find((m) => preferred.includes(m.modelID))
+      || models.find((m) => m.providerID === def.opencode)
+      || models[0] || null;
   } catch {
     /* providers optional */
   }
