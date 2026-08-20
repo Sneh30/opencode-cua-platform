@@ -32,6 +32,25 @@ from shared.action_schema import Action, ActionType, Screenshot
 
 logger = logging.getLogger("cua_gateway.model_client")
 
+DEFAULT_MODEL_ID = "mlx-community/UI-TARS-1.5-7B-4bit"
+
+
+def resolve_model_id(explicit: str | None) -> str:
+    """Resolve the GUI-agent model: explicit arg, then env override
+    (CUA_GATEWAY_MODEL = HF id or local dir, CUA_MODEL_DIR = local dir),
+    then the default HF checkpoint.
+
+    `CUA_MODEL_DIR` lets the distributed app point the gateway at a bundled
+    or pre-provisioned local copy of the model (no HF download at runtime).
+    """
+    if explicit:
+        return explicit
+    for env in ("CUA_GATEWAY_MODEL", "CUA_MODEL_DIR"):
+        value = os.environ.get(env)
+        if value:
+            return value
+    return DEFAULT_MODEL_ID
+
 # ---------------------------------------------------------------------------
 # Model-agnostic contract
 # ---------------------------------------------------------------------------
@@ -279,8 +298,10 @@ class UiTarsMLXClient(ModelClient):
     same reason.
     """
 
-    def __init__(self, model_id: str = "mlx-community/UI-TARS-1.5-7B-4bit"):
-        self.model_id = model_id
+    def __init__(self, model_id: str | None = None):
+        self.model_id = resolve_model_id(model_id)
+        # A local directory path needs no HF download and no offline pinning.
+        self._local_dir = bool(self.model_id) and Path(self.model_id).is_dir()
         self._model = None
         self._processor = None
         self._config = None
@@ -312,7 +333,8 @@ class UiTarsMLXClient(ModelClient):
     def _ensure_loaded(self):
         with self._lock:
             if self._model is None:
-                self._force_offline_if_cached()
+                if not self._local_dir:
+                    self._force_offline_if_cached()
                 from mlx_vlm import load
                 from mlx_vlm.prompt_utils import apply_chat_template  # noqa: F401
                 from mlx_vlm.utils import load_config
@@ -320,8 +342,7 @@ class UiTarsMLXClient(ModelClient):
                 self._model, self._processor = load(self.model_id)
                 self._config = load_config(self.model_id)
 
-    @staticmethod
-    def _force_offline_if_cached() -> None:
+    def _force_offline_if_cached(self) -> None:
         """Use the HF cache when the model is already downloaded.
 
         mlx-vlm's loader can hang for minutes on network probes of the HF
@@ -329,7 +350,7 @@ class UiTarsMLXClient(ModelClient):
         repo is present under the HF cache, pin the hub to offline mode so
         the first `gui.act` loads in seconds instead of hanging.
         """
-        repo_dir = "models--" + UiTarsMLXClient.model_id_for_cache("mlx-community/UI-TARS-1.5-7B-4bit")
+        repo_dir = "models--" + UiTarsMLXClient.model_id_for_cache(self.model_id)
         hf_home = os.environ.get("HF_HOME") or str(Path.home() / ".cache" / "huggingface")
         if (Path(hf_home) / "hub" / repo_dir).is_dir():
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -392,10 +413,11 @@ class UiTarsMLXClient(ModelClient):
 
 
 # ModelClient instance used by the Gateway executor. Lazy-loads on first use.
-def get_client(model_id: str = "mlx-community/UI-TARS-1.5-7B-4bit") -> ModelClient:
+def get_client(model_id: str | None = None) -> ModelClient:
     global _CLIENT
-    if _CLIENT is None or _CLIENT.model_id != model_id:
-        _CLIENT = UiTarsMLXClient(model_id)
+    resolved = resolve_model_id(model_id)
+    if _CLIENT is None or _CLIENT.model_id != resolved:
+        _CLIENT = UiTarsMLXClient(resolved)
     return _CLIENT
 
 
