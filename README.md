@@ -8,6 +8,38 @@ MCP, with structural verification and recovery. Docs (source of truth):
 - `docs/03-Master-Prompt.md` — supervisor prompt delivered via MCP `instructions`
 - `docs/04-Roadmap-and-Engineering-Decisions.md` — milestones + engineering decisions
 
+## Troubleshooting
+
+### Recurring "privacy & security" permission prompts (fixed)
+
+When the platform is launched from the native app, macOS TCC attributes
+screen-capture / accessibility requests to the app's process tree. A prior
+version spawned `opencode serve` detached (breaking the responsible-process
+chain), auto-restarted failing services forever, and the UI polled
+`/api/screen.jpg` every ~2.5 s — so a missing grant caused an **infinite
+prompt loop** that made the desktop unusable.
+
+Fixed structurally (M11):
+
+- The screen loop **stops after 2 failed captures** and latches
+  `screenPermissionDenied`; `/api/screen.jpg` returns `409` and the UI
+  shows a "Screen Recording permission needed" banner with an **Open
+  System Settings** button instead of polling
+- `opencode serve` is no longer spawned detached, so its children (the
+  gateway python, screencapture) stay under the same responsible app and
+  one grant covers them
+- Auto-restart is capped at 5 attempts, then the server stands down until
+  you press START
+- The banner resumes capture when you click **Retry** after granting
+
+**What to enable (once, per app build):** open System Settings →
+Privacy & Security → **Screen Recording** and **Accessibility**, and
+enable the entries that appear — typically **CUA Control**; also enable
+**Terminal** / **node** / **Python** if listed. Rebuilding the app creates
+a new bundle identity, so re-enable the new entry after a rebuild. When
+the grant is missing the UI now tells you exactly what to do instead of
+looping.
+
 ## Status
 
 **Native app + instant STOP + speed (2026-08-20, M8–M10):**

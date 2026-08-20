@@ -26,6 +26,7 @@ function initState() {
     busy: false,
     opencodeLogs: [],
     screenEnabled: true,
+    screenPermissionDenied: false,
     lifecycleBusy: false,
   };
 }
@@ -80,6 +81,7 @@ function reducer(state, action) {
         ...state,
         meta,
         busy: meta.busy ?? state.busy,
+        screenPermissionDenied: !!meta.screenPermissionDenied,
         gatewayShots: meta.gatewayLogs?.screenshots || state.gatewayShots,
         gatewayLogs: meta.gatewayLogs?.files || state.gatewayLogs,
         mcpMeta: undefined,
@@ -167,6 +169,8 @@ function reducer(state, action) {
       return { ...state, screenAt: action.properties.at, screenError: null };
     case "screen.error":
       return { ...state, screenError: action.properties.error };
+    case "screen.permission":
+      return { ...state, screenPermissionDenied: true, screenError: null };
     case "screen.toggled":
       return { ...state, screenEnabled: action.enabled };
     case "lifecycle":
@@ -388,6 +392,8 @@ export default function App() {
             shots={state.gatewayShots}
             busy={state.busy}
             enabled={state.screenEnabled}
+            permissionDenied={state.screenPermissionDenied}
+            onRetry={() => toggleScreen(true)}
           />
           <ActivityFeed
             sessionId={state.activeSessionId}

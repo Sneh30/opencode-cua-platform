@@ -1,18 +1,18 @@
 import React, { useEffect, useRef, useState } from "react";
 import { fmtTime } from "../lib/api.js";
 
-export default function LiveScreen({ at, error, shots, busy, enabled }) {
+export default function LiveScreen({ at, error, shots, busy, enabled, permissionDenied, onRetry }) {
   const [imgAt, setImgAt] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const pollRef = useRef(null);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || permissionDenied) return;
     const tick = () => setImgAt(Date.now());
     tick();
     pollRef.current = setInterval(tick, busy ? 1300 : 2600);
     return () => clearInterval(pollRef.current);
-  }, [enabled, busy, at]);
+  }, [enabled, busy, at, permissionDenied]);
 
   const src = imgAt ? `/api/screen.jpg?t=${imgAt}` : null;
   const [obs, act] = [shots["observe.png"], shots["act.png"]];
@@ -28,7 +28,25 @@ export default function LiveScreen({ at, error, shots, busy, enabled }) {
         </div>
       </div>
       <div className="screen-wrap">
-        {enabled ? (
+        {permissionDenied ? (
+          <div className="screen-permission">
+            <p><strong>Screen Recording permission needed</strong></p>
+            <p>
+              Open <em>System Settings → Privacy &amp; Security → Screen Recording</em> and
+              enable <strong>CUA Control</strong> (enable <strong>Terminal</strong>, <strong>Python</strong> or
+              <strong> node</strong> too if they appear in the list). Then click Retry.
+            </p>
+            <div className="screen-permission-actions">
+              <a
+                className="btn btn-mini btn-start"
+                href="x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+              >
+                Open System Settings
+              </a>
+              <button className="btn btn-mini" onClick={onRetry}>Retry capture</button>
+            </div>
+          </div>
+        ) : enabled ? (
           src ? (
             <img key={src} src={src} alt="live desktop" className="screen-img" />
           ) : (

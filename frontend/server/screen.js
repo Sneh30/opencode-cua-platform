@@ -20,6 +20,25 @@ function run(cmd, args, timeoutMs = 15_000) {
 
 let lastCapture = { at: 0, bytes: 0, ok: false, error: null };
 let inflight = null;
+let consecutiveFailures = 0;
+let permissionDenied = false;
+
+function markPermissionDenied() {
+  permissionDenied = true;
+}
+
+function clearPermissionDenied() {
+  permissionDenied = false;
+}
+
+function permissionStatus() {
+  return permissionDenied;
+}
+
+function resetPermission() {
+  permissionDenied = false;
+  consecutiveFailures = 0;
+}
 
 /**
  * Capture the main display as a downscaled JPEG.
@@ -28,10 +47,18 @@ let inflight = null;
  * Screen Recording permission), then resizes with sips. Falls back to the
  * CUA Gateway's own adapter (via the gateway venv python) if screencapture
  * fails — the venv interpreter is the one with the TCC grants.
+ *
+ * When both paths fail repeatedly (2+), we treat it as a missing Screen
+ * Recording grant for the responsible app and latch `permissionDenied` —
+ * the control server then stops polling and the UI shows a settings
+ * banner instead of hammering TCC with prompts every 2.5 seconds.
  */
 async function capture() {
   if (inflight) return inflight;
   inflight = (async () => {
+    if (permissionDenied) {
+      return { ...lastCapture, path: SCREEN_JPG, permission: true };
+    }
     const raw = path.join(WORK, "raw.png");
     const now = Date.now();
     const res = await run("/usr/sbin/screencapture", ["-x", raw]);
@@ -74,9 +101,19 @@ async function capture() {
       }
     }
 
+    if (err) {
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= 2) {
+        permissionDenied = true;
+      }
+    } else {
+      consecutiveFailures = 0;
+      permissionDenied = false;
+    }
+
     fs.rmSync(raw, { force: true });
     fs.rmSync(path.join(WORK, "screen-full.jpg"), { force: true });
-    return { ...lastCapture, path: SCREEN_JPG };
+    return { ...lastCapture, path: SCREEN_JPG, permission: permissionDenied };
   })();
   try {
     return await inflight;
@@ -128,4 +165,4 @@ function lastCaptureInfo() {
   return { ...lastCapture, exists: fs.existsSync(SCREEN_JPG) };
 }
 
-module.exports = { capture, screenFile, lastCaptureInfo, WORK };
+module.exports = { capture, screenFile, lastCaptureInfo, WORK, permissionStatus, resetPermission };

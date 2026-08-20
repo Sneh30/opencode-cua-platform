@@ -333,6 +333,29 @@ body {
   font-weight: 600;
 }
 
+.screen-permission {
+  padding: 24px 20px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.screen-permission p {
+  margin: 6px 0;
+}
+
+.screen-permission-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 14px;
+}
+
+.screen-permission a {
+  text-decoration: none;
+}
+
 .icon-btn {
   background: none;
   border: none;

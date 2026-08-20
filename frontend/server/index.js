@@ -91,6 +91,7 @@ const state = {
   appsRunning: {},
   startedAt: Date.now(),
   screenCaptureEnabled: true,
+  screenPermissionDenied: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -211,6 +212,17 @@ async function captureTick() {
   if (!state.screenCaptureEnabled || clients.size === 0) return;
   try {
     const shot = await screen.capture();
+    if (shot.permission) {
+      // Screen Recording grant missing for this launch context — stop
+      // polling so TCC is not hammered with prompts every few seconds.
+      stopScreenLoop();
+      state.screenPermissionDenied = true;
+      broadcast({
+        type: "screen.permission",
+        properties: { denied: true, error: shot.error || "screen recording permission needed" },
+      });
+      return;
+    }
     if (shot.ok && state.lastScreen !== shot.at) {
       state.lastScreen = shot.at;
       broadcast({ type: "screen.updated", properties: { at: shot.at } });
@@ -224,6 +236,8 @@ async function captureTick() {
 
 function startScreenLoop() {
   if (state.screenInterval) return;
+  screen.resetPermission();
+  state.screenPermissionDenied = false;
   state.screenInterval = setInterval(captureTick, isBusy() ? 1200 : 2500);
   if (state.screenInterval.unref) state.screenInterval.unref();
   captureTick();
@@ -302,6 +316,7 @@ function metaPayload() {
     autoApprove: state.autoApprove,
     busy: isBusy(),
     screen: screen.lastCaptureInfo(),
+    screenPermissionDenied: !!state.screenPermissionDenied,
     logsDir: LOGS_DIR,
     startedAt: state.startedAt,
     gatewayLogs: state.logs ? state.logs.snapshot() : { files: {}, screenshots: {} },
@@ -359,6 +374,9 @@ async function handleApi(req, res, url) {
   if (pathname === "/api/screen.jpg" && req.method === "GET") {
     if (!state.screenCaptureEnabled) {
       return sendJson(res, 409, { error: "screen capture stopped" });
+    }
+    if (state.screenPermissionDenied) {
+      return sendJson(res, 409, { error: "screen recording permission needed — enable Screen Recording for CUA Control (and Terminal/python if listed) in System Settings" });
     }
     const shot = await screen.capture();
     const file = screen.screenFile();
@@ -485,8 +503,13 @@ async function handleApi(req, res, url) {
     if (typeof body.autoApprove === "boolean") state.autoApprove = body.autoApprove;
     if (typeof body.screenCaptureEnabled === "boolean") {
       state.screenCaptureEnabled = body.screenCaptureEnabled;
-      if (body.screenCaptureEnabled) startScreenLoop();
-      else stopScreenLoop();
+      if (body.screenCaptureEnabled) {
+        state.screenPermissionDenied = false;
+        screen.resetPermission();
+        startScreenLoop();
+      } else {
+        stopScreenLoop();
+      }
     }
     broadcast({ type: "meta.updated", properties: metaPayload() });
     return sendJson(res, 200, { ok: true, autoApprove: state.autoApprove });

@@ -44,6 +44,7 @@ class OpencodeServer extends EventEmitter {
   async start({ port }) {
     if (this.running) return this._waitHealthy();
     this._manuallyStopped = false;
+    this._restartAttempts = 0;
     this.port = port;
     const args = [
       "serve",
@@ -56,10 +57,10 @@ class OpencodeServer extends EventEmitter {
       cwd: this.repoRoot,
       env: { ...process.env },
       stdio: ["ignore", "pipe", "pipe"],
-      // Own process group so stop() can SIGKILL opencode AND its children
-      // (the CUA Gateway / Browser Adapter MCP servers — i.e. the screen
-      // capture processes) in one instant kill.
-      detached: true,
+      // NOTE: no `detached` — the opencode process must stay in this
+      // process's tree so macOS TCC attributes its children (the gateway
+      // python, screencapture) to the same responsible app. Detaching
+      // would break that chain and re-trigger permission prompts.
     });
     this.proc.stdout.on("data", (d) => {
       const line = String(d).trim();
@@ -99,7 +100,17 @@ class OpencodeServer extends EventEmitter {
 
   _scheduleRestart() {
     if (this._retryTimer) return;
-    this.emit("log", `[opencode] restarting in ${this._sseRetryDelay}ms`);
+    this._restartAttempts = (this._restartAttempts || 0) + 1;
+    // Cap auto-restarts: a failing launch loop re-triggers TCC permission
+    // prompts on every respawn. After 5 tries the server stands down and
+    // waits for an explicit START.
+    if (this._restartAttempts > 5) {
+      this.emit("log", "[opencode] giving up auto-restart after 5 attempts — press START");
+      this._retryTimer = null;
+      return;
+    }
+    const delay = Math.min(this._sseRetryDelay * this._restartAttempts, 10_000);
+    this.emit("log", `[opencode] restarting in ${delay}ms (attempt ${this._restartAttempts}/5)`);
     this._retryTimer = setTimeout(async () => {
       this._retryTimer = null;
       try {
@@ -107,7 +118,7 @@ class OpencodeServer extends EventEmitter {
       } catch {
         this._scheduleRestart();
       }
-    }, this._sseRetryDelay);
+    }, delay);
   }
 
   async stop() {
@@ -121,21 +132,30 @@ class OpencodeServer extends EventEmitter {
       this._sseAbort.abort();
       this._sseAbort = null;
     }
-    if (!proc) return;
-    proc.removeAllListeners("exit");
-    try {
-      // SIGKILL the whole process group: opencode serve + every MCP
-      // server it spawned (gateway screen capture, browser adapter).
-      // This is the instant "everything off" the STOP button promises.
-      process.kill(-proc.pid, "SIGKILL");
-      this.emit("log", "[opencode] STOP: killed process group (SIGKILL)");
-    } catch (err) {
-      this.emit("log", `[opencode] STOP: group kill failed: ${err.message}`);
+    if (proc) {
+      proc.removeAllListeners("exit");
+      proc.kill("SIGTERM");
+    }
+    // Kill the MCP servers opencode spawned (gateway screen capture,
+    // browser adapter) — they do not die with opencode.
+    for (const pattern of ["cua-gateway", "browser-adapter"]) {
       try {
-        proc.kill("SIGKILL");
+        const killer = spawn("/usr/bin/pkill", ["-9", "-f", pattern]);
+        killer.on("error", () => {});
       } catch {
-        /* already dead */
+        /* best effort */
       }
+    }
+    this.emit("log", "[opencode] STOP: opencode SIGTERM sent, MCP children killed");
+    if (proc) {
+      // Escalate to SIGKILL so STOP is instant even if shutdown hangs.
+      setTimeout(() => {
+        try {
+          process.kill(proc.pid, "SIGKILL");
+        } catch {
+          /* already dead */
+        }
+      }, 800).unref();
     }
   }
 

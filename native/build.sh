@@ -9,6 +9,13 @@
 #
 # The app must be able to find the platform repo: it walks up from the
 # bundle location, or honors CUA_PLATFORM_ROOT.
+#
+# Signing: ad-hoc signature (no keychain identity, no signing prompts).
+# The TCC Screen Recording / Accessibility grants for the app-launched
+# context are stable per-built-bundle — a rebuild produces a new bundle
+# identity, so after a rebuild re-enable the entries once in System
+# Settings. The control server itself stops polling and shows a banner
+# when the grant is missing, so there is no prompt storm.
 
 set -euo pipefail
 cd "$(dirname "$0")"

@@ -101,6 +101,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         }
     }
 
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        // Let the UI's "Open System Settings" button reach the Settings app.
+        if let url = navigationAction.request.url,
+           url.scheme == "x-apple.systempreferences" {
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
     // MARK: - services
 
     private func findRepoRoot() -> URL? {
