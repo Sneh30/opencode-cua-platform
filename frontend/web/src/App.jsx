@@ -8,6 +8,7 @@ import TaskComposer from "./components/TaskComposer.jsx";
 import GatewayLog from "./components/GatewayLog.jsx";
 import SessionsList from "./components/SessionsList.jsx";
 import PermissionModal from "./components/PermissionModal.jsx";
+import SimpleMode from "./components/SimpleMode.jsx";
 
 function initState() {
   return {
@@ -217,8 +218,24 @@ function reducer(state, action) {
 export default function App() {
   const [state, dispatch] = useReducer(reducer, null, initState);
   const [toastShown, setToastShown] = useState(false);
+  const [mode, setMode] = useState(() => {
+    try {
+      return localStorage.getItem("cua-mode") || "simple";
+    } catch {
+      return "simple";
+    }
+  });
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  const changeMode = (m) => {
+    setMode(m);
+    try {
+      localStorage.setItem("cua-mode", m);
+    } catch {
+      /* ignore */
+    }
+  };
 
   const refreshSessions = async () => {
     try {
@@ -374,6 +391,31 @@ export default function App() {
         onRespond={replyPermission}
       />
 
+      <nav className="modetabs">
+        <button className={`mtab ${mode === "simple" ? "mtab-on" : ""}`} onClick={() => changeMode("simple")}>
+          Simple
+        </button>
+        <button className={`mtab ${mode === "advanced" ? "mtab-on" : ""}`} onClick={() => changeMode("advanced")}>
+          Advanced
+        </button>
+      </nav>
+
+      {mode === "simple" ? (
+        <SimpleMode
+          sessions={state.sessions}
+          activeSessionId={state.activeSessionId}
+          messages={state.messages}
+          busy={state.busy}
+          models={state.meta?.models || []}
+          defaultModel={state.meta?.defaultModel}
+          onSelectSession={(id) => dispatch({ type: "set-active-session", id })}
+          onNewSession={() => dispatch({ type: "set-active-session", id: null })}
+          onRun={runTask}
+          onAbort={async () => {
+            if (state.activeSessionId) await api.abort(state.activeSessionId);
+          }}
+        />
+      ) : (
       <div className="layout">
         <aside className="col col-left">
           <AppLauncher apps={state.apps} />
@@ -418,6 +460,7 @@ export default function App() {
           <GatewayLog files={state.gatewayLogs} shots={state.gatewayShots} />
         </aside>
       </div>
+      )}
     </div>
   );
 }
