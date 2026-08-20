@@ -7,6 +7,8 @@ MCP, with structural verification and recovery. Docs (source of truth):
 - `docs/02-Architecture.md` — component architecture
 - `docs/03-Master-Prompt.md` — supervisor prompt delivered via MCP `instructions`
 - `docs/04-Roadmap-and-Engineering-Decisions.md` — milestones + engineering decisions
+- `docs/05-Recreation-Spec.md` — complete recreation specification (an LLM can rebuild
+  the whole platform from this doc alone, incl. every roadblock and its fix)
 
 ## Troubleshooting
 
