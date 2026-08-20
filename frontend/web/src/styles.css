@@ -32,6 +32,17 @@ body {
   font-family: var(--sans);
   font-size: 13.5px;
   line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(79, 140, 255, 0.3);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .app {
@@ -1009,6 +1020,7 @@ body {
   max-width: 340px;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
   cursor: pointer;
+  animation: fadeInUp 0.16s ease-out;
 }
 
 .toast-ok {
@@ -1029,10 +1041,12 @@ body {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(3px);
   z-index: 300;
   display: flex;
   align-items: center;
   justify-content: center;
+  animation: fadeInUp 0.15s ease-out;
 }
 
 .perm-modal {
@@ -1162,6 +1176,28 @@ body {
   min-height: 0;
 }
 
+@keyframes slideInLeft {
+  from {
+    transform: translateX(-14px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes fadeInUp {
+  from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
 .simple-sidebar {
   width: 250px;
   flex: 0 0 250px;
@@ -1170,6 +1206,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  animation: slideInLeft 0.18s ease-out;
 }
 
 .simple-sidebar-head {
@@ -1398,6 +1435,8 @@ body {
   overflow-y: auto;
   flex: 1;
   min-height: 0;
+  animation: fadeInUp 0.2s ease-out;
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.18);
 }
 
 .simple-output p {
