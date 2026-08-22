@@ -338,12 +338,15 @@ class UiTarsMLXClient(ModelClient):
             if self._model is None:
                 if not self._local_dir:
                     self._force_offline_if_cached()
+                import mlx.core as mx
+                mx.set_default_device(mx.Device(mx.gpu))
                 from mlx_vlm import load
                 from mlx_vlm.prompt_utils import apply_chat_template  # noqa: F401
                 from mlx_vlm.utils import load_config
 
                 self._model, self._processor = load(self.model_id)
                 self._config = load_config(self.model_id)
+                logger.info(f"UI-TARS loaded on device: {mx.default_device()}")
 
     def _force_offline_if_cached(self) -> None:
         """Use the HF cache when the model is already downloaded.
@@ -383,6 +386,8 @@ class UiTarsMLXClient(ModelClient):
 
         from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template
+        from PIL import Image
+        import io
 
         if not screenshot.display_width or not screenshot.display_height:
             raise ModelClientError("screenshot lacks display dims; cannot map model coords")
@@ -394,22 +399,31 @@ class UiTarsMLXClient(ModelClient):
         prompt = UI_TARS_SYSTEM_TEMPLATE.format(
             action_space=UI_TARS_ACTION_SPACE, instruction=task
         )
+
+        # Downscale image for faster inference (max 256px on longest side)
+        img_data = open(screenshot.ref, "rb").read()
+        img = Image.open(io.BytesIO(img_data))
+        max_dim = 256
+        if max(img.width, img.height) > max_dim:
+            img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+
         messages = [
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "url": screenshot.ref},
+                    {"type": "image", "image": img},
                     {"type": "text", "text": prompt},
                 ],
             }
         ]
         formatted = apply_chat_template(self._processor, self._config, messages, num_images=1)
+        from mlx_vlm import generate
         output = generate(
             self._model,
             self._processor,
             formatted,
-            [screenshot.ref],
-            max_tokens=256,
+            [img],
+            max_tokens=128,
             temperature=0.0,
         )
         parsed = parse_model_output(output.text)
@@ -423,7 +437,6 @@ class UiTarsMLXClient(ModelClient):
 
         # Cache the result (LRU eviction)
         if len(self._infer_cache) >= self._cache_max_size:
-            # Remove oldest entry
             oldest_key = next(iter(self._infer_cache))
             del self._infer_cache[oldest_key]
         self._infer_cache[cache_key] = action
