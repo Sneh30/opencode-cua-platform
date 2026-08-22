@@ -26,6 +26,7 @@ const { spawn } = require("node:child_process");
 
 const { OpencodeServer } = require("./opencode");
 const { GatewayLogs } = require("./logs");
+const { TaskManager } = require("./task-manager");
 const screen = require("./screen");
 const apps = require("./apps");
 
@@ -78,6 +79,7 @@ function isBusy() {
 const state = {
   opencode: null,
   logs: null,
+  taskManager: null,
   activeSession: null,
   sessionStatus: {},
   mcp: {},
@@ -295,24 +297,34 @@ function handleOpencodeEvent(evt) {
       const { sessionID, status } = evt.properties;
       state.sessionStatus[sessionID] = status;
       broadcast({ type: evt.type, properties: evt.properties });
-      // Model health tracking: when session goes idle, evaluate outcome
-      if (status.type === "idle" && state.activeSession?.id === sessionID) {
-        const sessionModel = state.activeSession.model;
-        const duration = Date.now() - (state.activeSession.taskStart || Date.now());
-        // Check if session produced tool calls (non-empty)
-        // We'll need to check messages for tool calls; for now track duration
-        // Short duration (< 10s) with no tool calls = likely empty session
-        const isLikelyEmpty = duration < 10000; // heuristic
-        if (sessionModel) {
+      // Model health tracking + task completion: when session goes idle
+      if (status.type === "idle") {
+        // Find task by sessionId
+        const task = Array.from(state.taskManager.tasks.values()).find(t => t.sessionId === sessionID);
+        if (task) {
+          const duration = Date.now() - (task.startedAt || Date.now());
+          const isLikelyEmpty = duration < 10000;
+          if (task.model) {
+            if (isLikelyEmpty) {
+              recordModelFailure(task.model, true);
+              console.log(`[model-health] Empty session for ${task.model} (${duration}ms)`);
+            } else {
+              recordModelSuccess(task.model, duration);
+              console.log(`[model-health] Success for ${task.model} (${duration}ms)`);
+            }
+          }
+          // Complete or fail the task
           if (isLikelyEmpty) {
-            recordModelFailure(sessionModel, true);
-            console.log(`[model-health] Empty session detected for ${sessionModel} (${duration}ms)`);
+            state.taskManager.fail(task.id, "Empty session (no tool calls)");
+            console.log(`[task-manager] Task failed (empty): ${task.id}`);
           } else {
-            recordModelSuccess(sessionModel, duration);
-            console.log(`[model-health] Success for ${sessionModel} (${duration}ms)`);
+            state.taskManager.complete(task.id, { duration });
+            console.log(`[task-manager] Task completed: ${task.id}`);
           }
         }
-        state.activeSession = null;
+        if (state.activeSession?.id === sessionID) {
+          state.activeSession = null;
+        }
       }
       break;
     }
@@ -689,6 +701,58 @@ async function handleApi(req, res, url) {
     return sendJson(res, 200, { ok: true, autoApprove: state.autoApprove });
   }
 
+  // -- tasks ------------------------------------------------------------
+  if (pathname === "/api/tasks" && req.method === "GET") {
+    const { status, limit } = url.searchParams;
+    return sendJson(res, 200, { tasks: state.taskManager.list({ status, limit: Number(limit) || 100 }) });
+  }
+
+  if (pathname === "/api/tasks" && req.method === "POST") {
+    const body = await readBody(req);
+    const text = (body.text || "").trim();
+    if (!text) return sendJson(res, 400, { error: "missing task text" });
+    const task = state.taskManager.create({
+      text,
+      model: body.model || null,
+      priority: body.priority || "normal",
+      metadata: body.metadata || {},
+    });
+    return sendJson(res, 201, task);
+  }
+
+  const taskIdMatch = pathname.match(/^\/api\/tasks\/([^/]+)$/);
+  if (taskIdMatch && req.method === "GET") {
+    const task = state.taskManager.get(taskIdMatch[1]);
+    if (!task) return sendJson(res, 404, { error: "task not found" });
+    return sendJson(res, 200, task);
+  }
+
+  if (taskIdMatch && req.method === "DELETE") {
+    // Delete not implemented; tasks are pruned automatically
+    return sendJson(res, 405, { error: "use retry/complete instead" });
+  }
+
+  const taskActionMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/(retry|complete|fail)$/);
+  if (taskActionMatch && req.method === "POST") {
+    const [, taskId, action] = taskActionMatch;
+    let ok = false;
+    if (action === "retry") ok = state.taskManager.retry(taskId);
+    else if (action === "complete") ok = state.taskManager.complete(taskId, (await readBody(req)).result || {});
+    else if (action === "fail") ok = state.taskManager.fail(taskId, (await readBody(req)).error || "unknown");
+    if (!ok) return sendJson(res, 400, { error: "invalid action or task state" });
+    return sendJson(res, 200, { ok: true, task: state.taskManager.get(taskId) });
+  }
+
+  // -- task execution status (for UI polling) ---------------------------
+  if (pathname === "/api/tasks/execution" && req.method === "GET") {
+    return sendJson(res, 200, {
+      active: state.activeSession,
+      queue: state.taskManager.list({ status: "pending", limit: 10 }),
+      running: state.taskManager.list({ status: "running", limit: 10 }),
+      recent: state.taskManager.list({ status: "completed", limit: 10 }),
+    });
+  }
+
   return sendJson(res, 404, { error: `no route: ${pathname}` });
 }
 
@@ -723,6 +787,48 @@ async function main() {
   });
   state.logs.start();
 
+  // Task orchestration
+  state.taskManager = new TaskManager();
+  state.taskManager.prune();
+
+  // Resume interrupted tasks on startup
+  const resumable = state.taskManager.getResumable();
+  for (const task of resumable) {
+    console.log(`[task-manager] Resumable task found: ${task.id} (status: ${task.status})`);
+    // Could auto-resume here; for now just log
+  }
+
+  // Task execution loop
+  async function taskExecutionLoop() {
+    while (true) {
+      try {
+        if (state.opencode?.running) {
+          const task = state.taskManager.getNextPending();
+          if (task) {
+            console.log(`[task-manager] Executing task: ${task.id}`);
+            const session = await state.opencode.createSession(task.text.slice(0, 60));
+            // Use task model or fall back to default
+            const model = task.model || (state.defaultModel ? { providerID: state.defaultModel.providerID, modelID: state.defaultModel.modelID } : null);
+            // Update task with the model being used so health tracking works
+            if (model && !task.model) {
+              task.model = model.modelID;
+              task.updatedAt = Date.now();
+              state.taskManager.save();
+            }
+            state.taskManager.start(task.id, session.id);
+            state.activeSession = { id: session.id, model: model?.modelID, taskStart: Date.now(), taskId: task.id };
+            await state.opencode.promptAsync(session.id, { text: task.text, model });
+            // Task completion tracked via session.status events
+          }
+        }
+      } catch (e) {
+        console.error("[task-manager] Execution loop error:", e.message);
+      }
+      await new Promise(r => setTimeout(r, 5000));
+    }
+  }
+  taskExecutionLoop();
+
   // heartbeat so browsers can detect control-server liveness
   setInterval(() => {
     if (clients.size === 0) return;
@@ -743,6 +849,7 @@ async function main() {
 
   const shutdown = async () => {
     console.log("shutting down...");
+    state.taskManager?.shutdown();
     state.logs.stop();
     if (state.opencode) await state.opencode.stop();
     server.close(() => process.exit(0));
