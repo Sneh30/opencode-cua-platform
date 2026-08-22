@@ -145,7 +145,7 @@ async function refreshMeta() {
     const preferred = ["deepseek-v4-flash-free"];
     state.defaultModel =
       models.find((m) => preferred.includes(m.modelID))
-      || models.find((m) => m.providerID === def.opencode)
+      || models.find((m) => m.providerID === "opencode" && m.modelID === def.opencode)
       || models[0] || null;
   } catch {
     /* providers optional */
