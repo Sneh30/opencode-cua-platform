@@ -33,7 +33,7 @@ export default function LiveScreen({ at, error, shots, busy, enabled, permission
             <p><strong>Screen Recording permission needed</strong></p>
             <p>
               Open <em>System Settings → Privacy &amp; Security → Screen Recording</em> and
-              enable <strong>CUA Control</strong> (enable <strong>Terminal</strong>, <strong>Python</strong> or
+              enable <strong>opencode-operator</strong> (enable <strong>Terminal</strong>, <strong>Python</strong> or
               <strong> node</strong> too if they appear in the list). Then click Retry.
             </p>
             <div className="screen-permission-actions">

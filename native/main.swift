@@ -1,53 +1,157 @@
-// CUA Control — native macOS launcher for the OpenCode Computer-Use Platform.
+// opencode-operator — native macOS launcher for the OpenCode Computer-Use
+// Platform.
 //
-// Double-click to launch. On startup the app:
-//   1. finds the platform repo root (walk up from the bundle, or
-//      CUA_PLATFORM_ROOT)
-//   2. boots the control server (node frontend/server/index.js) unless
-//      one is already serving on :8787 — the control server spawns
-//      `opencode serve`, which in turn attaches the CUA Gateway and
-//      Browser Adapter MCP servers
-//   3. opens the full CUA control UI (chat, live screen, logs) in an
-//      embedded WKWebView — no browser tab, no URL
+// Two launch modes:
 //
-// Toolbar: status indicator, START and STOP. STOP kills opencode + the
-// gateway screen-capture processes instantly (process-group SIGKILL via
-// the control server) and halts live screen capture the moment it's
-// clicked. START brings everything back. Quitting the app stops all
-// services too.
+// DISTRIBUTED (the bundle was produced by native/bundle.sh): the bundle
+// embeds the whole platform (Contents/Resources/platform), vendored
+// runtimes (Contents/Resources/vendor: node, uv, opencode, a managed
+// CPython) and the GUI-agent model (Contents/Resources/model). On first
+// launch — or whenever the installed copy is missing, stale or broken —
+// the app runs native/provision.sh, streaming its output into a
+// provisioning status window. Provisioning copies the platform into
+// ~/Library/Application Support/opencode-operator/platform, installs the
+// vendored runtimes next to it and patches the shipped virtualenvs to the
+// installed Python. No network, no Homebrew, no manual setup. The 5 GB
+// GUI-agent model is referenced straight from the bundle (CUA_MODEL_DIR),
+// so it stays contained in the application itself.
+//
+// DEV (plain `native/build.sh` output): behaves like before — walks up
+// from the bundle to find the platform repo (or honors CUA_PLATFORM_ROOT)
+// and uses the machine's own node/opencode.
+//
+// After provisioning the app boots the control server (node
+// frontend/server/index.js), which spawns `opencode serve`, which attaches
+// the CUA Gateway and Browser Adapter MCP servers, and opens the control
+// UI in an embedded WKWebView. Toolbar: status indicator, START, STOP.
+// STOP kills the whole stack instantly; quitting the app stops everything.
 
 import AppKit
 import WebKit
 
 let CONTROL_URL = "http://127.0.0.1:8787"
 
+// ---------------------------------------------------------------------------
+// Layout
+// ---------------------------------------------------------------------------
+
+/// Filesystem layout for the distributed bundle + its writable install.
+struct DistributionLayout {
+    let platformSrc: URL      // <bundle>/Contents/Resources/platform (read-only)
+    let vendorBin: URL        // <bundle>/Contents/Resources/vendor/bin
+    let vendorPython: URL     // <bundle>/Contents/Resources/vendor/python (root dir of managed installs)
+    let modelSrc: URL?        // <bundle>/Contents/Resources/models/UI-TARS-1.5-7B-4bit
+    let installRoot: URL      // ~/Library/Application Support/opencode-operator
+    let installPlatform: URL  // …/platform
+    let runtimeBin: URL       // …/runtime/bin   (node, uv, opencode)
+    let runtimePython: URL    // …/runtime/python (managed CPython installs)
+
+    static func resolve() -> DistributionLayout? {
+        guard let res = Bundle.main.resourceURL else { return nil }
+        let fm = FileManager.default
+        let platformSrc = res.appendingPathComponent("platform", isDirectory: true)
+        guard fm.fileExists(atPath: platformSrc.appendingPathComponent("frontend/server/index.js").path) else {
+            return nil
+        }
+        let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        let installRoot = support.appendingPathComponent("opencode-operator", isDirectory: true)
+        let modelRel = res.appendingPathComponent("models/UI-TARS-1.5-7B-4bit", isDirectory: true)
+        return DistributionLayout(
+            platformSrc: platformSrc,
+            vendorBin: res.appendingPathComponent("vendor/bin", isDirectory: true),
+            vendorPython: res.appendingPathComponent("vendor/python", isDirectory: true),
+            modelSrc: fm.fileExists(atPath: modelRel.appendingPathComponent("config.json").path) ? modelRel : nil,
+            installRoot: installRoot,
+            installPlatform: installRoot.appendingPathComponent("platform", isDirectory: true),
+            runtimeBin: installRoot.appendingPathComponent("runtime/bin", isDirectory: true),
+            runtimePython: installRoot.appendingPathComponent("runtime/python", isDirectory: true)
+        )
+    }
+
+    /// The venv symlinks are patched to this interpreter at provision time.
+    /// The managed install directory is named `cpython-3.14.<patch>…`.
+    func runtimePythonBin() -> URL {
+        let fm = FileManager.default
+        if let entries = try? fm.contentsOfDirectory(atPath: runtimePython.path) {
+            let dirs = entries.filter { $0.hasPrefix("cpython-3.14") }.sorted()
+            if let dir = dirs.last {
+                return runtimePython.appendingPathComponent(dir).appendingPathComponent("bin/python3")
+            }
+        }
+        return runtimePython.appendingPathComponent("cpython-3.14/bin/python3")
+    }
+
+    /// True when the installed copy looks complete, current and healthy.
+    func isProvisioned() -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: installPlatform.appendingPathComponent("frontend/server/index.js").path),
+              fm.fileExists(atPath: installPlatform.appendingPathComponent(".provisioned").path) else {
+            return false
+        }
+        // Version drift between the bundle and the installed copy → refresh.
+        let srcVersion = try? String(contentsOf: platformSrc.appendingPathComponent("VERSION"), encoding: .utf8)
+        let dstVersion = try? String(contentsOf: installPlatform.appendingPathComponent("VERSION"), encoding: .utf8)
+        if srcVersion != dstVersion { return false }
+        // The venv interpreter symlink must point at the installed runtime.
+        let link = installPlatform.appendingPathComponent("gateway/.venv/bin/python3")
+        guard let target = try? fm.destinationOfSymbolicLink(atPath: link.path) else { return false }
+        return URL(fileURLWithPath: target, relativeTo: link.deletingLastPathComponent())
+            .standardizedFileURL.path == runtimePythonBin().standardizedFileURL.path
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App delegate
+// ---------------------------------------------------------------------------
+
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     var window: NSWindow!
     var webView: WKWebView!
+    var container: NSView!
+    var provisionView: NSView!
+    var provisionLog: NSTextView!
+    var provisionSpinner: NSProgressIndicator!
+    var provisionStatus: NSTextField!
+    var retryButton: NSButton!
+
     var controlTask: Process?
-    var repoRoot: URL?
+    var provisionTask: Process?
+    var repoRoot: URL?                 // dev mode
+    var dist: DistributionLayout?      // distributed mode
     var statusTimer: Timer?
     var statusField: NSTextField!
     var stopButton: NSButton!
     var startButton: NSButton!
     var uiLoaded = false
+    var provisioning = false
 
     // MARK: - lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupWindow()
 
-        guard let root = findRepoRoot() else {
-            presentFatal("Could not find the platform repo (frontend/server/index.js).\n\nSet CUA_PLATFORM_ROOT or keep CUA.app inside the platform repo.")
+        dist = DistributionLayout.resolve()
+        if dist == nil {
+            guard let root = findRepoRoot() else {
+                presentFatal("Could not find the platform.\n\nA distributed opencode-operator.app embeds it automatically; a dev build (native/build.sh) must live inside the platform repo, or CUA_PLATFORM_ROOT must point at one.")
+                return
+            }
+            repoRoot = root
+            startServices()
+            loadUI()
+            pollStatusLoop()
             return
         }
-        repoRoot = root
-        startServices()
-        loadUI()
-        pollStatusLoop()
+
+        if dist!.isProvisioned() {
+            beginServing()
+        } else {
+            runProvisioning()
+        }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        provisionTask?.terminate()
         cleanupServices()
         return .terminateNow
     }
@@ -56,12 +160,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         true
     }
 
-    // MARK: - window + webview
+    // MARK: - window + webview + provisioning view
 
     private func setupWindow() {
         let rect = NSRect(x: 0, y: 0, width: 1320, height: 860)
         window = NSWindow(contentRect: rect, styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "CUA Control"
+        window.title = "opencode-operator"
         window.minSize = NSSize(width: 1000, height: 640)
 
         let config = WKWebViewConfiguration()
@@ -70,19 +174,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         webView.navigationDelegate = self
         webView.autoresizingMask = [.width, .height]
 
-        let toolbar = NSToolbar(identifier: "CUA.Toolbar")
+        let toolbar = NSToolbar(identifier: "Operator.Toolbar")
         toolbar.delegate = self
         toolbar.displayMode = .iconAndLabel
         toolbar.allowsUserCustomization = false
         window.toolbar = toolbar
 
-        let container = NSView(frame: rect)
+        container = NSView(frame: rect)
         webView.frame = container.bounds
+        webView.isHidden = true
         container.addSubview(webView)
+        container.addSubview(buildProvisionView(bounds: container.bounds))
         window.contentView = container
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func buildProvisionView(bounds: NSRect) -> NSView {
+        let view = NSView(frame: bounds)
+        view.autoresizingMask = [.width, .height]
+
+        let icon = NSImageView(frame: NSRect(x: 0, y: 0, width: 96, height: 96))
+        icon.image = NSApp.applicationIconImage
+        icon.frame.origin = NSPoint(x: (bounds.width - 96) / 2, y: bounds.height - 140)
+        icon.autoresizingMask = [.minXMargin, .maxXMargin]
+
+        let title = NSTextField(labelWithString: "opencode-operator")
+        title.font = .systemFont(ofSize: 22, weight: .semibold)
+        title.sizeToFit()
+        title.frame.origin = NSPoint(x: (bounds.width - title.frame.width) / 2, y: bounds.height - 170)
+        title.autoresizingMask = [.minXMargin, .maxXMargin]
+
+        provisionStatus = NSTextField(wrappingLabelWithString: "Preparing first launch…")
+        provisionStatus.font = .systemFont(ofSize: 13)
+        provisionStatus.textColor = .secondaryLabelColor
+        provisionStatus.alignment = .center
+        provisionStatus.frame = NSRect(x: 40, y: bounds.height - 210, width: bounds.width - 80, height: 34)
+        provisionStatus.autoresizingMask = [.width, .minXMargin, .maxXMargin]
+
+        let logScroll = NSScrollView(frame: NSRect(x: 60, y: 90, width: bounds.width - 120, height: bounds.height - 330))
+        logScroll.autoresizingMask = [.width, .height]
+        logScroll.hasVerticalScroller = true
+        logScroll.borderType = .bezelBorder
+        provisionLog = NSTextView(frame: NSRect(x: 0, y: 0, width: logScroll.contentSize.width, height: logScroll.contentSize.height))
+        provisionLog.isEditable = false
+        provisionLog.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        provisionLog.textContainer?.widthTracksTextView = true
+        logScroll.documentView = provisionLog
+
+        provisionSpinner = NSProgressIndicator(frame: NSRect(x: (bounds.width - 24) / 2, y: 52, width: 24, height: 24))
+        provisionSpinner.style = .spinning
+        provisionSpinner.autoresizingMask = [.minXMargin, .maxXMargin]
+
+        retryButton = NSButton(title: "Retry", target: self, action: #selector(retryProvisionTapped))
+        retryButton.bezelStyle = .rounded
+        retryButton.frame = NSRect(x: (bounds.width - 80) / 2, y: 44, width: 80, height: 32)
+        retryButton.isHidden = true
+        retryButton.autoresizingMask = [.minXMargin, .maxXMargin]
+
+        view.addSubview(icon)
+        view.addSubview(title)
+        view.addSubview(provisionStatus)
+        view.addSubview(logScroll)
+        view.addSubview(provisionSpinner)
+        view.addSubview(retryButton)
+        provisionView = view
+        return view
+    }
+
+    private func appendProvisionLine(_ line: String) {
+        let text = line + "\n"
+        provisionLog.textStorage?.append(NSAttributedString(string: text, attributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+            .foregroundColor: NSColor.labelColor,
+        ]))
+        provisionLog.scrollRangeToVisible(NSRange(location: (provisionLog.string as NSString).length, length: 0))
     }
 
     private func loadUI() {
@@ -95,7 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         // Control server still booting — retry shortly.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            if self.uiLoaded {
+            if self.uiLoaded && !self.provisioning {
                 self.webView.load(URLRequest(url: URL(string: CONTROL_URL)!))
             }
         }
@@ -114,6 +281,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             return
         }
         decisionHandler(.allow)
+    }
+
+    // MARK: - provisioning flow
+
+    @objc func retryProvisionTapped() {
+        retryButton.isHidden = true
+        provisionSpinner.startAnimation(nil)
+        runProvisioning()
+    }
+
+    private func runProvisioning() {
+        guard let dist = dist else { return }
+        provisioning = true
+        stopButton.isEnabled = false
+        startButton.isEnabled = false
+        webView.isHidden = true
+        provisionView.isHidden = false
+        provisionStatus.stringValue = "Installing the platform — this happens once and needs no internet…"
+        provisionLog.textStorage?.setAttributedString(NSAttributedString(string: ""))
+        provisionSpinner.startAnimation(nil)
+
+        let fm = FileManager.default
+        try? fm.createDirectory(at: dist.installRoot, withIntermediateDirectories: true)
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/bash")
+        task.arguments = [Bundle.main.resourceURL!.appendingPathComponent("provision.sh").path]
+        task.currentDirectoryURL = dist.installRoot
+        task.environment = [
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME": NSHomeDirectory(),
+            "CUA_PLATFORM_SRC": dist.platformSrc.path,
+            "CUA_INSTALL_DIR": dist.installRoot.path,
+            "CUA_BIN_DIR": dist.vendorBin.path,
+            "CUA_VENDOR_PYTHON": dist.vendorPython.path,
+            "CUA_RUNTIME_BIN": dist.runtimeBin.path,
+            "CUA_RUNTIME_PYTHON": dist.runtimePython.path,
+            "CUA_MODEL_SRC": dist.modelSrc?.path ?? "",
+        ]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = pipe
+        pipe.fileHandleForReading.readabilityHandler = { fh in
+            let data = fh.availableData
+            guard !data.isEmpty, let s = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async {
+                for line in s.split(separator: "\n") where !line.isEmpty {
+                    self.appendProvisionLine(String(line))
+                }
+            }
+        }
+        task.terminationHandler = { proc in
+            DispatchQueue.main.async {
+                self.provisioning = false
+                self.provisionSpinner.stopAnimation(nil)
+                if proc.terminationStatus == 0 && self.dist?.isProvisioned() == true {
+                    self.beginServing()
+                } else {
+                    self.provisionStatus.stringValue = "Setup failed (\(proc.terminationStatus)). See the log above — fix the issue and press Retry."
+                    self.retryButton.isHidden = false
+                }
+            }
+        }
+        do {
+            try task.run()
+            provisionTask = task
+        } catch {
+            provisioning = false
+            provisionSpinner.stopAnimation(nil)
+            provisionStatus.stringValue = "Could not run the installer: \(error.localizedDescription)"
+            retryButton.isHidden = false
+        }
+    }
+
+    /// Provisioning done (or not needed): flip to the control UI and boot
+    /// the service stack against the installed platform.
+    private func beginServing() {
+        provisionView.isHidden = true
+        webView.isHidden = false
+        startServices()
+        loadUI()
+        pollStatusLoop()
     }
 
     // MARK: - services
@@ -138,6 +387,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     }
 
     private func nodeBinary() -> String {
+        // Distributed mode: the node runtime installed next to the platform.
+        if let dist = dist {
+            let vendored = dist.runtimeBin.appendingPathComponent("node").path
+            if FileManager.default.isExecutableFile(atPath: vendored) { return vendored }
+        }
         for candidate in [
             "/opt/homebrew/bin/node",
             "/usr/local/bin/node",
@@ -150,10 +404,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         return "/usr/bin/env node"
     }
 
+    private func platformRoot() -> URL? {
+        if let dist = dist { return dist.installPlatform }
+        return repoRoot
+    }
+
     private func serviceEnv() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let home = NSHomeDirectory()
-        env["PATH"] = "\(home)/.opencode/bin:\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        var path = "\(home)/.opencode/bin:\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        if let dist = dist {
+            // Vendored runtimes win: the app must not depend on whatever
+            // happens to be installed on this Mac.
+            path = "\(dist.runtimeBin.path):\(dist.vendorBin.path):\(path)"
+            env["OPENCODE_BIN"] = dist.runtimeBin.appendingPathComponent("opencode").path
+            if let model = dist.modelSrc {
+                // The GUI-agent model stays inside the application bundle;
+                // the gateway loads it read-only from there.
+                env["CUA_MODEL_DIR"] = model.path
+            }
+        }
+        env["PATH"] = path
         env["PORT"] = "8787"
         return env
     }
@@ -174,14 +445,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     }
 
     private func spawnControlServer() {
-        guard let root = repoRoot else { return }
+        guard let root = platformRoot() else { return }
         let task = Process()
         task.executableURL = URL(fileURLWithPath: nodeBinary())
         task.arguments = ["server/index.js"]
         task.currentDirectoryURL = root.appendingPathComponent("frontend")
         task.environment = serviceEnv()
 
-        // Persist control-server + opencode logs into the repo's logs/
+        // Persist control-server + opencode logs into the platform's logs/
         // directory so everything is inspectable after the fact.
         let logsDir = root.appendingPathComponent("logs", isDirectory: true)
         try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
@@ -191,7 +462,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             let pipeErr = Pipe()
             task.standardOutput = pipeOut
             task.standardError = pipeErr
-            let start = "===== CUA app launched \(Date()) =====\n".data(using: .utf8) ?? Data()
+            let start = "===== opencode-operator launched \(Date()) =====\n".data(using: .utf8) ?? Data()
             handle.seekToEndOfFile()
             handle.write(start)
             for pipe in [pipeOut, pipeErr] {
@@ -229,6 +500,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             }
         }
         pkillPattern("opencode serve")
+        pkillPattern("cua-gateway")
         pkillPattern("cua_gateway")
         pkillPattern("browser-adapter")
     }
@@ -251,6 +523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
                 if !ok {
                     // Belt and suspenders: kill opencode + gateway directly.
                     self.pkillPattern("opencode serve")
+                    self.pkillPattern("cua-gateway")
                     self.pkillPattern("cua_gateway")
                 }
                 self.status("stopped")
@@ -295,6 +568,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
     private func pollStatusLoop() {
         statusTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
+            guard !self.provisioning else { return }
             self.checkStatus { healthy in
                 DispatchQueue.main.async {
                     if healthy {
@@ -333,7 +607,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
     private func presentFatal(_ message: String) {
         let alert = NSAlert()
-        alert.messageText = "CUA Control"
+        alert.messageText = "opencode-operator"
         alert.informativeText = message
         alert.runModal()
         NSApp.terminate(nil)

@@ -18,3 +18,8 @@ frontend/dist/
 
 # native app build output
 native/build/
+
+# native distribution build output
+native/bundle/
+native/dist/
+native/vendor-cache/

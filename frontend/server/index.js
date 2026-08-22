@@ -376,7 +376,7 @@ async function handleApi(req, res, url) {
       return sendJson(res, 409, { error: "screen capture stopped" });
     }
     if (state.screenPermissionDenied) {
-      return sendJson(res, 409, { error: "screen recording permission needed — enable Screen Recording for CUA Control (and Terminal/python if listed) in System Settings" });
+      return sendJson(res, 409, { error: "screen recording permission needed — enable Screen Recording for opencode-operator (and Terminal/python if listed) in System Settings" });
     }
     const shot = await screen.capture();
     const file = screen.screenFile();

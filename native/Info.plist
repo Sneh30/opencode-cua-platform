@@ -5,15 +5,17 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleExecutable</key>
-	<string>CUA</string>
+	<string>opencode-operator</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
-	<string>ai.opencode.cua-control</string>
+	<string>ai.opencode.operator</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>CUA Control</string>
+	<string>opencode-operator</string>
 	<key>CFBundleDisplayName</key>
-	<string>CUA Control</string>
+	<string>opencode-operator</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
