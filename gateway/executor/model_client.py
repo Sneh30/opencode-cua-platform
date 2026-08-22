@@ -86,15 +86,15 @@ class ModelClient(ABC):
 # UI-TARS prompt format (OSWorld-style, verified against the checkpoint)
 # ---------------------------------------------------------------------------
 
-UI_TARS_ACTION_SPACE = """click(start_box='<|box_start|>(x1,y1)<|box_end|>')
-left_double(start_box='<|box_start|>(x1,y1)<|box_end|>')
-right_single(start_box='<|box_start|>(x1,y1)<|box_end|>')
-drag(start_box='<|box_start|>(x1,y1)<|box_end|>', end_box='<|box_start|>(x3,y3)<|box_end|>')
-hotkey(key='')
-type(content='') #If you want to submit your input, use "\\n" at the end of `content`.
-scroll(start_box='<|box_start|>(x1,y1)<|box_end|>', direction='down or up or right or left')
-wait() #Sleep for 5s and take a screenshot to check for any changes.
-finished()
+UI_TARS_ACTION_SPACE = """click(start_box='<|box_start|>(x1,y1)<|box_end|>') -- SINGLE LEFT CLICK on a button, link, icon, menu item, or any clickable element. Use this for 90% of interactions.
+left_double(start_box='<|box_start|>(x1,y1)<|box_end|>') -- DOUBLE CLICK only for opening files/folders or selecting text. Rarely needed.
+right_single(start_box='<|box_start|>(x1,y1)<|box_end|>') -- RIGHT CLICK for context menus only.
+drag(start_box='<|box_start|>(x1,y1)<|box_end|>', end_box='<|box_start|>(x3,y3)<|box_end|>') -- DRAG AND DROP for moving files, resizing windows, or slider controls.
+hotkey(key='') -- KEYBOARD SHORTCUTS only (e.g., 'cmd+c', 'ctrl+v', 'cmd+tab', 'enter', 'escape'). Use for shortcuts, NOT for typing text.
+type(content='') -- TYPE TEXT into input fields, search boxes, address bars. End with \\n to submit.
+scroll(start_box='<|box_start|>(x1,y1)<|box_end|>', direction='down or up or right or left') -- SCROLL only when content is off-screen and you need to reveal more. Direction must be one of: down, up, right, left.
+wait() -- WAIT only when you MUST wait for a page/app to load (e.g., after navigation). Use sparingly - max once per task.
+finished() -- TASK COMPLETE only when the entire user instruction is fully satisfied. Do not use until done.
 """
 
 UI_TARS_SYSTEM_TEMPLATE = """You are a GUI agent. You are given a task and your action history, with screenshots. You need to perform the next action to complete the task.
@@ -108,9 +108,24 @@ Action: ...
 ## Action Space
 {action_space}
 
+## CRITICAL RULES - READ CAREFULLY:
+1. DEFAULT TO click() -- For buttons, links, icons, menus, tabs, checkboxes, radio buttons, dropdowns, tabs, close buttons, minimize/maximize, file icons, app icons -- use click(). This is 90% of actions.
+2. ONLY use double_click() for opening files/folders in file managers or selecting words in text editors.
+3. ONLY use scroll() when content is visibly cut off and you need to see more. Direction MUST be down/up/left/right.
+4. ONLY use wait() when a page/app is clearly loading (spinner, progress bar, blank screen). Max once per task.
+5. ONLY use type() for text input fields. End with \\n to submit.
+6. ONLY use hotkey() for keyboard shortcuts (copy/paste, app switching, form submission with Enter).
+7. ONLY use drag() for file moves, window resizing, or slider dragging.
+8. ONLY use finished() when the ENTIRE task is complete and verified.
+9. NEVER output wait() as a default -- it wastes time.
+10. NEVER output double_click() for buttons/links -- use click().
+11. NEVER output scroll() for clicking -- use click().
+11. Coordinates MUST be in the resized image space (use the box format exactly as shown).
+
 ## Note
 - Use English in `Thought` part.
 - Write a small plan and finally summarize your next action (with its target element) in one sentence in `Thought` part.
+- Be decisive -- pick ONE action per step.
 
 ## User Instruction
 The task is: {instruction}
@@ -276,6 +291,13 @@ class UiTarsActionNormalizer:
             return Action(type=ActionType.SCROLL, target_hint=target_hint, params=params)
         if name in ("wait", "finished"):
             raise UnsupportedModelAction(name, args)
+        
+        # Auto-correct common model mistakes
+        corrected_name = _auto_correct_action(name, args, target_hint)
+        if corrected_name != name:
+            logger.warning(f"Auto-corrected model action: {name} -> {corrected_name}")
+            return self.normalize(corrected_name, args, target_hint)
+        
         raise ModelClientError(f"unknown action name: {name!r}")
 
 
@@ -283,6 +305,43 @@ def _normalize_hotkey(key: str) -> str:
     """'cmd c' / 'ctrl c' / 'arrowleft' -> '+'-joined combo for os_adapter."""
     parts = [HOTKEY_ALIASES.get(p.lower(), p.lower()) for p in key.split()]
     return "+".join(parts)
+
+
+def _auto_correct_action(name: str, args: dict[str, Any], target_hint: str) -> str:
+    """Auto-correct common model action mistakes based on context.
+    
+    Common mistakes:
+    - wait() -> click() (model waits instead of acting)
+    - double_click() -> click() (model double-clicks buttons/links)
+    - scroll() -> click() (model scrolls instead of clicking visible elements)
+    - wait() -> click() when target_hint suggests clicking
+    """
+    hint = target_hint.lower()
+    
+    # wait() is almost never the right action - convert to click
+    if name == "wait":
+        return "click"
+    
+    # double_click on buttons/links/menus -> click
+    if name == "left_double":
+        click_keywords = ["button", "link", "menu", "icon", "tab", "checkbox", "radio", 
+                          "dropdown", "close", "minimize", "maximize", "submit", "ok", 
+                          "cancel", "save", "open", "file", "folder", "app", "item"]
+        if any(kw in hint for kw in click_keywords):
+            return "click"
+    
+    # scroll when we should click visible elements
+    if name == "scroll":
+        click_keywords = ["button", "link", "icon", "menu", "tab", "checkbox", "radio",
+                          "dropdown", "input", "field", "search", "address", "close"]
+        if any(kw in hint for kw in click_keywords):
+            return "click"
+    
+    # double_click on text fields -> click to focus, then type
+    if name == "left_double" and ("text" in hint or "input" in hint or "field" in hint or "search" in hint):
+        return "click"
+    
+    return name
 
 
 # ---------------------------------------------------------------------------

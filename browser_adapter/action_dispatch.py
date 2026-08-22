@@ -83,13 +83,15 @@ class BrowserDispatcher:
     async def _click(self, action: Action) -> ActionRecord:
         index = action.params.get("index")
         if index is None:
-            raise BrowserDispatchError(
-                "click requires 'index' in params (1-based element index from browser.observe)"
-            )
+            # Try to find element by target_hint text matching
+            index = await self._find_element_index(action.target_hint)
+            if index is None:
+                raise BrowserDispatchError(
+                    "click requires 'index' in params (1-based element index from browser.observe) "
+                    "or a target_hint that matches an element"
+                )
         index = int(index)
         if index < 1:
-            # browser-use 0.13.8 click indexes are 1-based (ge=1); tolerate
-            # planners that pass a 0-based first element.
             index = 1
         am = self._model()(click={"index": index})
         result = await self._controller.act(am, browser_session=self._session)
@@ -99,12 +101,74 @@ class BrowserDispatcher:
             raw_result={"clicked_index": index, "result": str(result)},
         )
 
+    async def _find_element_index(self, target_hint: str) -> int | None:
+        """Find element index by matching target_hint against element text/attributes.
+        
+        Returns 1-based index or None if not found.
+        """
+        if not target_hint:
+            return None
+        try:
+            state = await self._session.get_browser_state_summary()
+            selector_map = state.dom_state.selector_map
+            hint_lower = target_hint.lower()
+            
+            # First pass: exact text match
+            for idx, element in selector_map.items():
+                text = (element.get_all_text() or "").strip().lower()
+                if text and hint_lower in text:
+                    return idx
+            
+            # Second pass: attribute match (placeholder, aria-label, title, alt)
+            for idx, element in selector_map.items():
+                attrs = [
+                    element.attributes.get("placeholder", "").lower(),
+                    element.attributes.get("aria-label", "").lower(),
+                    element.attributes.get("title", "").lower(),
+                    element.attributes.get("alt", "").lower(),
+                    element.attributes.get("value", "").lower(),
+                ]
+                if any(hint_lower in attr for attr in attrs if attr):
+                    return idx
+            
+            # Third pass: tag name match for common elements
+            tag_keywords = {
+                "input": "input",
+                "button": "button",
+                "link": "a",
+                "link": "link",
+                "search": "input",
+                "button": "button",
+                "submit": "button",
+                "search box": "input",
+                "text field": "input",
+                "textbox": "input",
+                "dropdown": "select",
+                "menu": "select",
+            }
+            for keyword, tag in tag_keywords.items():
+                if keyword in target_hint.lower():
+                    for idx, element in selector_map.items():
+                        if element.tag_name == tag:
+                            return idx
+            
+            return None
+        except Exception as exc:
+            logger.warning("_find_element_index failed: %s", exc)
+            return None
+
     async def _type(self, action: Action) -> ActionRecord:
         index = action.params.get("index")
         text = action.params.get("text", "")
         clear = action.params.get("clear", True)
         if index is None:
-            raise BrowserDispatchError("type requires 'index' in params")
+            # Try to find element by target_hint text matching
+            index = await self._find_element_index(action.target_hint)
+            if index is None:
+                raise BrowserDispatchError(
+                    "type requires 'index' in params (1-based element index from browser.observe) "
+                    "or a target_hint that matches an element"
+                )
         am = self._model()(input={"index": int(index), "text": text, "clear": clear})
         result = await self._controller.act(am, browser_session=self._session)
         return ActionRecord(
