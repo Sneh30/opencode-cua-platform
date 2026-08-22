@@ -400,10 +400,10 @@ class UiTarsMLXClient(ModelClient):
             action_space=UI_TARS_ACTION_SPACE, instruction=task
         )
 
-        # Downscale image for faster inference (max 256px on longest side)
+        # Downscale image for faster inference (max 1280px on longest side = 720p)
         img_data = open(screenshot.ref, "rb").read()
         img = Image.open(io.BytesIO(img_data))
-        max_dim = 256
+        max_dim = 1280
         if max(img.width, img.height) > max_dim:
             img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
 
@@ -423,7 +423,7 @@ class UiTarsMLXClient(ModelClient):
             self._processor,
             formatted,
             [img],
-            max_tokens=128,
+            max_tokens=256,
             temperature=0.0,
         )
         parsed = parse_model_output(output.text)
