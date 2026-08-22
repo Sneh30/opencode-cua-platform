@@ -84,6 +84,7 @@ const state = {
   providers: null,
   models: [],
   defaultModel: null,
+  modelHealth: new Map(), // modelID -> { successes, failures, emptySessions, totalLatency, lastUsed }
   autoApprove: true,
   autoApproveTypes: new Set(["bash", "edit"]),
   lastScreen: null,
@@ -153,11 +154,166 @@ async function refreshMeta() {
   broadcast({ type: "meta.updated", properties: metaPayload() });
 }
 
+// ============================================================
+// Model Health Tracking + Fallback Chain
+// ============================================================
+
+const MODEL_FALLBACK_CHAIN = [
+  // Priority order for GUI agent tasks
+  "deepseek-v4-flash-free",
+  "big-pickle",
+  "nemotron-3-ultra-free",
+  "hy3-free",
+  "muse-spark-1.2-contributor-free",
+  "x-preview-f-free",
+  "mimo-v2.5-free",
+];
+
+const MODEL_HEALTH_WINDOW = 50; // track last N tasks per model
+
+function getModelHealth(modelId) {
+  if (!state.modelHealth.has(modelId)) {
+    state.modelHealth.set(modelId, {
+      successes: 0,
+      failures: 0,
+      emptySessions: 0,
+      totalLatency: 0,
+      taskCount: 0,
+      lastUsed: 0,
+    });
+  }
+  return state.modelHealth.get(modelId);
+}
+
+function recordModelSuccess(modelId, latencyMs) {
+  const h = getModelHealth(modelId);
+  h.successes++;
+  h.taskCount++;
+  h.totalLatency += latencyMs;
+  h.lastUsed = Date.now();
+  // Keep window bounded
+  if (h.taskCount > MODEL_HEALTH_WINDOW) {
+    // Approximate: scale down
+    h.successes = Math.round(h.successes * 0.9);
+    h.failures = Math.round(h.failures * 0.9);
+    h.emptySessions = Math.round(h.emptySessions * 0.9);
+    h.taskCount = Math.round(h.taskCount * 0.9);
+    h.totalLatency = Math.round(h.totalLatency * 0.9);
+  }
+}
+
+function recordModelFailure(modelId, isEmptySession = false) {
+  const h = getModelHealth(modelId);
+  h.failures++;
+  h.taskCount++;
+  if (isEmptySession) h.emptySessions++;
+  h.lastUsed = Date.now();
+}
+
+function getModelScore(modelId) {
+  const h = getModelHealth(modelId);
+  if (h.taskCount < 3) return 100; // new models get benefit of doubt
+  const successRate = h.successes / h.taskCount;
+  const emptyRate = h.emptySessions / h.taskCount;
+  const avgLatency = h.totalLatency / Math.max(1, h.successes);
+  // Score: success rate (0-100) minus empty session penalty minus latency penalty
+  let score = successRate * 100;
+  score -= emptyRate * 50; // heavy penalty for empty sessions
+  score -= Math.min(30, avgLatency / 1000); // latency penalty capped at 30
+  return Math.max(0, score);
+}
+
+function selectBestModel(availableModels, preferredModelId = null) {
+  // Filter to available models
+  const available = availableModels.filter(m => state.models.some(am => am.modelID === m.modelID));
+  if (available.length === 0) return null;
+
+  // If preferred is available and healthy, use it
+  if (preferredModelId) {
+    const pref = available.find(m => m.modelID === preferredModelId);
+    if (pref && getModelScore(pref.modelID) > 30) return pref;
+  }
+
+  // Score all available models and pick best
+  let best = available[0];
+  let bestScore = -1;
+  for (const m of available) {
+    const score = getModelScore(m.modelID);
+    if (score > bestScore) {
+      bestScore = score;
+      best = m;
+    }
+  }
+  return best;
+}
+
+function getHealthyFallback(currentModelId, availableModels) {
+  // Return next best model excluding current
+  const candidates = availableModels.filter(m => m.modelID !== currentModelId);
+  return selectBestModel(candidates);
+}
+
+// Patch refreshMeta to use health-aware selection
+const originalRefreshMeta = refreshMeta;
+async function refreshMeta() {
+  if (!state.opencode?.running) return;
+  try {
+    state.mcp = await state.opencode.mcpStatus();
+  } catch {
+    state.mcp = {};
+  }
+  try {
+    state.sessionStatus = await state.opencode.sessionStatus();
+  } catch {
+    state.sessionStatus = {};
+  }
+  try {
+    const prov = await state.opencode.listProviders();
+    state.providers = prov;
+    const connected = new Set(prov.connected || []);
+    const models = [];
+    for (const p of prov.all || []) {
+      if (!connected.has(p.id)) continue;
+      for (const [modelId, m] of Object.entries(p.models || {})) {
+        if (m.status === "deprecated" || m.experimental) continue;
+        models.push({ providerID: p.id, modelID: modelId, name: m.name || modelId, limit: m.limit });
+      }
+    }
+    state.models = models;
+    const def = prov.default || {};
+    // Health-aware model selection with fallback chain
+    state.defaultModel = selectBestModel(models, def.opencode);
+  } catch {
+    /* providers optional */
+  }
+  broadcast({ type: "meta.updated", properties: metaPayload() });
+}
+
 function handleOpencodeEvent(evt) {
   switch (evt.type) {
     case "session.status": {
-      state.sessionStatus[evt.properties.sessionID] = evt.properties.status;
+      const { sessionID, status } = evt.properties;
+      state.sessionStatus[sessionID] = status;
       broadcast({ type: evt.type, properties: evt.properties });
+      // Model health tracking: when session goes idle, evaluate outcome
+      if (status.type === "idle" && state.activeSession?.id === sessionID) {
+        const sessionModel = state.activeSession.model;
+        const duration = Date.now() - (state.activeSession.taskStart || Date.now());
+        // Check if session produced tool calls (non-empty)
+        // We'll need to check messages for tool calls; for now track duration
+        // Short duration (< 10s) with no tool calls = likely empty session
+        const isLikelyEmpty = duration < 10000; // heuristic
+        if (sessionModel) {
+          if (isLikelyEmpty) {
+            recordModelFailure(sessionModel, true);
+            console.log(`[model-health] Empty session detected for ${sessionModel} (${duration}ms)`);
+          } else {
+            recordModelSuccess(sessionModel, duration);
+            console.log(`[model-health] Success for ${sessionModel} (${duration}ms)`);
+          }
+        }
+        state.activeSession = null;
+      }
       break;
     }
     case "session.idle":
@@ -306,6 +462,19 @@ function serveStatic(res, rel) {
 }
 
 function metaPayload() {
+  const modelHealth = {};
+  for (const [modelId, h] of state.modelHealth) {
+    modelHealth[modelId] = {
+      successes: h.successes,
+      failures: h.failures,
+      emptySessions: h.emptySessions,
+      taskCount: h.taskCount,
+      successRate: h.taskCount > 0 ? h.successes / h.taskCount : 0,
+      avgLatency: h.successes > 0 ? h.totalLatency / h.successes : 0,
+      score: getModelScore(modelId),
+      lastUsed: h.lastUsed,
+    };
+  }
   return {
     healthy: state.opencode?.running,
     version: state.opencode?.health?.version || "",
@@ -313,6 +482,7 @@ function metaPayload() {
     mcp: state.mcp,
     models: state.models,
     defaultModel: state.defaultModel,
+    modelHealth,
     autoApprove: state.autoApprove,
     busy: isBusy(),
     screen: screen.lastCaptureInfo(),
@@ -475,9 +645,13 @@ async function handleApi(req, res, url) {
     if (!text) return sendJson(res, 400, { error: "missing task text" });
     let model = body.model;
     if (model && !model.modelID) model = null;
-    state.activeSession = { id, title: (body.title || text).slice(0, 60) };
+    // Auto-select healthy model if none specified
+    if (!model && state.defaultModel) {
+      model = { providerID: state.defaultModel.providerID, modelID: state.defaultModel.modelID };
+    }
+    state.activeSession = { id, title: (body.title || text).slice(0, 60), model: model?.modelID, taskStart: Date.now() };
     await state.opencode.promptAsync(id, { text, model: model || null });
-    broadcast({ type: "task.started", properties: { sessionID: id, text } });
+    broadcast({ type: "task.started", properties: { sessionID: id, text, model: model?.modelID } });
     return sendJson(res, 202, { ok: true });
   }
 
