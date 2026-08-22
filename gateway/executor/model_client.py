@@ -307,6 +307,9 @@ class UiTarsMLXClient(ModelClient):
         self._config = None
         self._lock = threading.RLock()
         self.warmup_started = False
+        # Inference cache: (screenshot_hash, instruction) -> Action
+        self._infer_cache = {}
+        self._cache_max_size = 100
 
     def warmup(self) -> None:
         """Load the model in the background (idempotent, daemon thread).
@@ -371,6 +374,13 @@ class UiTarsMLXClient(ModelClient):
 
     def _infer_locked(self, screenshot: Screenshot, instruction: str, history: list[str] | None = None) -> Action:
         self._ensure_loaded()
+
+        # Inference cache key: screenshot hash + instruction (history excluded for cache hits)
+        cache_key = f"{screenshot.sha}|{instruction}"
+        if cache_key in self._infer_cache:
+            logger.debug(f"Inference cache hit for {cache_key[:32]}...")
+            return self._infer_cache[cache_key]
+
         from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template
 
@@ -409,7 +419,16 @@ class UiTarsMLXClient(ModelClient):
             screenshot.display_width,
             screenshot.display_height,
         )
-        return normalizer.normalize(parsed["name"], parsed["args"], target_hint=instruction)
+        action = normalizer.normalize(parsed["name"], parsed["args"], target_hint=instruction)
+
+        # Cache the result (LRU eviction)
+        if len(self._infer_cache) >= self._cache_max_size:
+            # Remove oldest entry
+            oldest_key = next(iter(self._infer_cache))
+            del self._infer_cache[oldest_key]
+        self._infer_cache[cache_key] = action
+
+        return action
 
 
 # ModelClient instance used by the Gateway executor. Lazy-loads on first use.

@@ -376,13 +376,15 @@ function maybeAutoApprove(perm) {
 // Screen capture loop
 // ---------------------------------------------------------------------------
 
+// Screen capture cache - avoids redundant captures
+const screenCache = new Map(); // hash -> { imagePath, timestamp }
+const SCREEN_CACHE_TTL = 500; // ms
+
 async function captureTick() {
   if (!state.screenCaptureEnabled || clients.size === 0) return;
   try {
     const shot = await screen.capture();
     if (shot.permission) {
-      // Screen Recording grant missing for this launch context — stop
-      // polling so TCC is not hammered with prompts every few seconds.
       stopScreenLoop();
       state.screenPermissionDenied = true;
       broadcast({
@@ -391,9 +393,18 @@ async function captureTick() {
       });
       return;
     }
-    if (shot.ok && state.lastScreen !== shot.at) {
-      state.lastScreen = shot.at;
-      broadcast({ type: "screen.updated", properties: { at: shot.at } });
+    if (shot.ok) {
+      // Cache: only broadcast if screen actually changed (hash differs)
+      const cacheKey = shot.hash || shot.at;
+      const cached = screenCache.get(cacheKey);
+      const now = Date.now();
+      if (!cached || now - cached.timestamp > SCREEN_CACHE_TTL) {
+        screenCache.set(cacheKey, { imagePath: shot.file, timestamp: now });
+        if (state.lastScreen !== shot.at) {
+          state.lastScreen = shot.at;
+          broadcast({ type: "screen.updated", properties: { at: shot.at } });
+        }
+      }
     } else if (!shot.ok) {
       broadcast({ type: "screen.error", properties: { error: shot.error } });
     }
@@ -406,7 +417,8 @@ function startScreenLoop() {
   if (state.screenInterval) return;
   screen.resetPermission();
   state.screenPermissionDenied = false;
-  state.screenInterval = setInterval(captureTick, isBusy() ? 1200 : 2500);
+  // Faster polling: 500ms busy, 1000ms idle (was 1200/2500)
+  state.screenInterval = setInterval(captureTick, isBusy() ? 500 : 1000);
   if (state.screenInterval.unref) state.screenInterval.unref();
   captureTick();
 }
@@ -824,7 +836,7 @@ async function main() {
       } catch (e) {
         console.error("[task-manager] Execution loop error:", e.message);
       }
-      await new Promise(r => setTimeout(r, 5000));
+      await new Promise(r => setTimeout(r, 1000));
     }
   }
   taskExecutionLoop();
