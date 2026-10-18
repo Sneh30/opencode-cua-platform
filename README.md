@@ -1,5 +1,11 @@
 # OpenCode Computer-Use Platform
 
+## Explainer video
+
+[▶ Watch the explainer video](explainer.mp4)
+
+---
+
 Single orchestrator (OpenCode, unmodified) driving desktop GUI and browser workers through
 MCP, with structural verification and recovery. Docs (source of truth):
 
